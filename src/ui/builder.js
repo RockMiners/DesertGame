@@ -99,7 +99,7 @@ export const BUILDER = {
     async saveBp() { const r = await this.app.cmd('saveBlueprint', { baseId: this.modal.args.baseId, name: document.getElementById('bp-name').value }); this.toast(esc(r.msg), r.ok ? 'good' : 'warn'); this.refresh(); },
     async applyBp() { const r = await this.app.cmd('applyBlueprint', { baseId: this.modal.args.baseId, index: +document.getElementById('bp-sel').value }); this.toast(esc(r.msg), r.ok ? 'good' : 'warn'); this.refresh(); },
     async rename() { await this.app.cmd('renameBase', { baseId: this.modal.args.baseId, name: document.getElementById('b-rename').value }); this.refresh(); },
-    async abandon() { if (!confirm('Abandon this base? Everything here is lost.')) return; const r = await this.app.cmd('abandonBase', { baseId: this.modal.args.baseId }); this.toast(esc(r.msg), 'warn'); this.close(); },
+    async abandon() { if (!(await this.ask('Abandon this base? Everything here is lost.', 'Abandon'))) return; const r = await this.app.cmd('abandonBase', { baseId: this.modal.args.baseId }); this.toast(esc(r.msg), 'warn'); this.close(); },
   },
   changes: {},
   inputs: {},

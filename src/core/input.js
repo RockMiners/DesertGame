@@ -26,7 +26,7 @@ export class Input {
     addEventListener('mousemove', (e) => {
       this.mouse.x = e.clientX; this.mouse.y = e.clientY;
       if (this.mouse.locked) { this.mouse.dx += e.movementX; this.mouse.dy += e.movementY; }
-      else if (this.mouse.buttons & 4 || this.mouse.buttons & 2 || this.dragLook) { this.mouse.dx += e.movementX; this.mouse.dy += e.movementY; }
+      else if (this.mouse.buttons & 4 || this.mouse.buttons & 2) { this.mouse.dx += e.movementX; this.mouse.dy += e.movementY; }
     });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('wheel', (e) => { this.mouse.wheel += Math.sign(e.deltaY); e.preventDefault(); }, { passive: false });

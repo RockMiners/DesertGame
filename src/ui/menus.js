@@ -51,12 +51,28 @@ function marketHTML(ui, at) {
         `<button data-action="buy" data-res="${r}" data-n="1" data-at="${at || 'hub'}">+1</button><button data-action="buy" data-res="${r}" data-n="10" data-at="${at || 'hub'}">+10</button><button data-action="sell" data-res="${r}" data-n="10" data-at="${at || 'hub'}" ${have ? '' : 'disabled'}>-10</button><button data-action="sell" data-res="${r}" data-n="9999" data-at="${at || 'hub'}" ${have ? '' : 'disabled'}>Sell all</button>`}</td></tr>`;
   }).join('');
   const caps = s.group.wallet;
-  return `<div class="market"><div class="mk-head"><span>🪙 <b>${caps}</b> caps</span><span>📦 ${Math.round(car.cargoUsed())}/${car.stats.cargo} cargo</span>${b ? `<span>${esc(b.name)} — ${own ? 'your storage' : `${esc(f.short)} trade post (cheap where they're rich)`}</span>` : '<span>Hub Bazaar: prices follow supply & demand across the whole waste</span>'}</div>
+  return `<div class="market">${handInButton(ui, at || 'hub')}<div class="mk-head"><span>🪙 <b>${caps}</b> caps</span><span>📦 ${Math.round(car.cargoUsed())}/${car.stats.cargo} cargo</span>${b ? `<span>${esc(b.name)} — ${own ? 'your storage' : `${esc(f.short)} trade post (cheap where they're rich)`}</span>` : '<span>Hub Bazaar: prices follow supply & demand across the whole waste</span>'}</div>
     <div class="scroll"><table class="tbl"><tr><th>Goods</th><th>Trend</th><th>Stock</th><th>Buy</th><th>Sell</th><th>Cargo</th><th></th></tr>${rows}</table></div>
     ${!own ? `<div class="services"><b>Services:</b> <button data-action="service" data-kind="fuel" data-at="${at || 'hub'}">⛽ Refuel</button><button data-action="service" data-kind="ammo" data-at="${at || 'hub'}">🔸 Rearm</button><button data-action="service" data-kind="repair" data-at="${at || 'hub'}">🔧 Repair</button></div>` : `<div class="services"><button data-action="stashAll">📥 Stash all cargo</button><button data-action="service" data-kind="fuel" data-at="${at}">⛽ Refuel from stores</button><button data-action="service" data-kind="ammo" data-at="${at}">🔸 Rearm</button><button data-action="service" data-kind="repair" data-at="${at}">🔧 Repair</button></div>`}</div>`;
 }
 
+function handInButton(ui, at) {
+  const s = ui.sim.s, car = ui.game.player.car;
+  const due = Object.values(s.missions).filter((m) => m.status === 'active' && m.obj.kind === 'deliver' && (m.obj.baseId ? m.obj.baseId === at : at === 'hub'));
+  if (!due.length) return '';
+  return `<div class="card handin">${due.map((m) => `<div>📦 <b>${esc(m.title)}</b>: ${m.obj.amount} ${RES_INFO[m.obj.res].icon} (you carry ${Math.floor(car.cargo[m.obj.res] || 0)})</div>`).join('')}<button data-action="handIn" data-at="${at}">Hand over mission cargo</button></div>`;
+}
+
 const MARKET_ACTIONS = {
+  async handIn(d) {
+    const car = this.game.player.car;
+    const cargo = {};
+    for (const [k, v] of Object.entries(car.cargo)) cargo[k] = Math.floor(v);
+    const r = await this.app.cmd('handIn', { cargo, at: d.at });
+    if (r.ok) for (const [k, v] of Object.entries(r.used || {})) car.takeCargo(k, v);
+    this.toast(esc(r.msg), r.ok ? 'good' : 'warn');
+    this.refresh();
+  },
   async sell(d) {
     const car = this.game.player.car;
     const n = Math.min(+d.n, Math.floor(car.cargo[d.res] || 0));
@@ -286,15 +302,15 @@ const CREW_ACTIONS = {
   async addRoute() { const r = await this.app.cmd('addRoute', { fromId: document.getElementById('rt-from').value, toId: document.getElementById('rt-to').value, res: document.getElementById('rt-res').value }); this.toast(esc(r.msg), r.ok ? 'good' : 'warn'); this.refresh(); },
   async removeRoute(d) { await this.app.cmd('removeRoute', { id: d.id }); this.refresh(); },
   async dip(d) {
-    if (d.a === 'betray' && !confirm('Betray your ally? This will be remembered for a long, long time.')) return;
+    if (d.a === 'betray' && !(await this.ask('Betray your ally? Their defences will be caught off guard, but the whole waste will remember this for a long, long time.', '🗡️ Betray them'))) return;
     const r = await this.app.cmd('diplomacy', { fid: d.fid, action: d.a });
     this.toast(esc(r.msg), r.ok ? 'good' : 'warn');
     this.refresh();
   },
   waypoint(d) { this.app.setWaypoint(+d.x, +d.z); this.toast('Waypoint set', 'info'); },
   async joinFaction(d) { const r = await this.app.cmd('join', { fid: d.fid }); this.toast(esc(r.msg), r.ok ? 'good' : 'warn'); this.refresh(); },
-  async leaveFaction() { if (!confirm('Leave your faction? They will not be pleased.')) return; const r = await this.app.cmd('leave', {}); this.toast(esc(r.msg), r.ok ? 'info' : 'warn'); this.refresh(); },
-  async coup() { if (!confirm('Attempt to seize control of the faction? If it fails, they will hunt you.')) return; const r = await this.app.cmd('coup', {}); this.toast(esc(r.msg), r.ok ? 'good' : 'bad'); this.refresh(); },
+  async leaveFaction() { if (!(await this.ask('Leave your faction? They will not be pleased.', 'Leave'))) return; const r = await this.app.cmd('leave', {}); this.toast(esc(r.msg), r.ok ? 'info' : 'warn'); this.refresh(); },
+  async coup() { if (!(await this.ask('Attempt to seize control of the faction? If it fails, they will hunt you.', '👑 Make my move'))) return; const r = await this.app.cmd('coup', {}); this.toast(esc(r.msg), r.ok ? 'good' : 'bad'); this.refresh(); },
   chronFilter(d) { this.modal.state.chron = d.f; this.refresh(); },
 };
 const CREW_CHANGES = {
@@ -497,7 +513,7 @@ export const MENUS = {
       if (tab === 'bazaar') return marketHTML(this, 'hub');
       if (tab === 'garage') return GARAGE.render.call(this, { at: 'hub' }, st);
       if (tab === 'cantina') return cantinaHTML(this);
-      if (tab === 'jobs') { const list = availableMissions(this); return `<div class="scroll">${list.map((m) => missionCard(this, m, true)).join('') || '<p class="muted">No jobs right now.</p>'}</div>`; }
+      if (tab === 'jobs') { const list = availableMissions(this); return `<div class="scroll">${handInButton(this, 'hub')}${list.map((m) => missionCard(this, m, true)).join('') || '<p class="muted">No jobs right now.</p>'}</div>`; }
       if (tab === 'inn') return `<div class="center-msg"><h3>Snooze Cruise Inn</h3><p>A bed, a bucket of water and a door that mostly locks. 15 caps.</p><p>Sleeping skips to morning and sets your respawn point here.</p><button data-action="sleep" data-base="hub">Sleep (15 caps)</button></div>`;
       if (tab === 'mayor') {
         const g = s.group;
@@ -556,7 +572,7 @@ export const MENUS = {
       if (tab === 'storage') return marketHTML(this, b.id);
       if (tab === 'trade') return marketHTML(this, b.id);
       if (tab === 'garage') return GARAGE.render.call(this, { at: b.id }, st);
-      if (tab === 'jobs') { const list = availableMissions(this, [b.factionId]); return `<div class="scroll">${list.map((m) => missionCard(this, m, true)).join('') || '<p class="muted">No jobs from them right now.</p>'}</div>`; }
+      if (tab === 'jobs') { const list = availableMissions(this, [b.factionId]); return `<div class="scroll">${handInButton(this, b.id)}${list.map((m) => missionCard(this, m, true)).join('') || '<p class="muted">No jobs from them right now.</p>'}</div>`; }
       if (tab === 'sleep') return `<div class="center-msg"><h3>Bunk down at ${esc(b.name)}</h3><p>Sleep until morning and respawn here if you get wrecked.</p><button data-action="sleep" data-base="${b.id}">Sleep</button></div>`;
       if (tab === 'info') {
         const f = s.factions[b.factionId];
@@ -622,7 +638,10 @@ export const MENUS = {
         <label>Mouse sensitivity <input type="range" min="0.3" max="2.5" step="0.1" value="${set.sens}" data-input="sens"/></label>
         <label><input type="checkbox" data-change="invertY" ${set.invertY ? 'checked' : ''}/> Invert mouse Y</label></div>`;
       if (tab === 'controls') return HELP_HTML;
-      if (tab === 'coop') return app.net ? app.net.statusHTML() : `<div class="center-msg"><p>Single-player game.</p><button data-action="hostNow">🌐 Open this game to friends</button><p class="muted small">Peer-to-peer: your PC hosts the world, friends connect directly with a code. No dedicated server.</p></div>`;
+      if (tab === 'coop') {
+        if (import.meta.env?.MODE === 'artifact') return `<div class="center-msg"><h3>Co-op needs the full version</h3><p>This embedded page can't open peer-to-peer connections. Run the game from its repository (<kbd>npm run dev</kbd>, or host the <kbd>dist/</kbd> build) to play with friends: one player hosts, the others join with a code.</p></div>`;
+        return app.net ? app.net.statusHTML() : `<div class="center-msg"><p>Single-player game.</p><button data-action="hostNow">🌐 Open this game to friends</button><p class="muted small">Peer-to-peer: your PC hosts the world, friends connect directly with a code. No dedicated server.</p></div>`;
+      }
       return '';
     },
     actions: {

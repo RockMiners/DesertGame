@@ -463,7 +463,8 @@ export class Sim {
     // survivors move to another base or die
     for (const n of Object.values(this.s.npcs)) if (n.baseId === b.id) {
       const other = this.factionBases(b.factionId)[0];
-      if (other && this.rng.chance(0.6)) n.baseId = other.id; else if (!n.squadId) this.killNpc(n, { base: b.id });
+      const survives = other && (n.role === 'leader' || this.rng.chance(0.6));
+      if (survives) n.baseId = other.id; else if (!n.squadId) this.killNpc(n, { base: b.id });
       else n.baseId = other ? other.id : null;
     }
     this.s.stats.basesDestroyed++;
@@ -743,7 +744,11 @@ export class Sim {
     const K = 0.2 * dt;
     // attackers hit garrison and structures (turrets first)
     let dmg = A.dps * K * rng.range(0.8, 1.2);
-    if (def.length) { const part = dmg * 0.4; this.hurtNpcDmg(rng.pick(def), part, { team: sq.factionId }); dmg -= part; }
+    // leaders stay in the bunker until the HQ is nearly gone
+    const hq = b.structs.find((x) => x.type === 'hq');
+    const lastStand = !hq || hq.hp < STRUCTS.hq.hp * 0.25;
+    const exposed = def.filter((n) => n.role !== 'leader' || lastStand);
+    if (exposed.length) { const part = dmg * 0.4; this.hurtNpcDmg(rng.pick(exposed), part, { team: sq.factionId }); dmg -= part; }
     const turrets = b.structs.filter((st) => STRUCTS[st.type].dps);
     for (let i = 0; i < 4 && dmg > 0.5 && s.bases[b.id]; i++) {
       const pool = turrets.filter((t) => t.hp > 0);

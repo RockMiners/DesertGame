@@ -168,7 +168,7 @@ export function genFaction(rng, usedNames = new Set()) {
   const traits = {};
   for (const k in base) traits[k] = Math.min(1, Math.max(0, base[k] + rng.range(-0.15, 0.15)));
   const leaderName = genDriverName(rng).replace(/ ".*" /, ' ');
-  const short = name.replace(/^The /, '').split(' ').pop();
+  const short = name.replace(/^The /, '');
   return {
     name, short, archetype,
     color: rng.pick(COLORS), accent: rng.pick(['#ffffff', '#222222', '#ffd166', '#06d6a0']),

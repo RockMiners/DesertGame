@@ -33,7 +33,7 @@ export class PlayerController {
     let steer = (inp.anyDown('KeyD', 'ArrowRight') ? 1 : 0) - (inp.anyDown('KeyA', 'ArrowLeft') ? 1 : 0);
     let hb = inp.down('Space') ? 1 : 0;
     let boost = inp.anyDown('ShiftLeft', 'ShiftRight') ? 1 : 0;
-    let fire0 = inp.mouseDown(0), fire1 = inp.mouseDown(2) && inp.mouse.locked;
+    let fire0 = inp.mouseDown(0), fire1 = inp.mouseDown(2) && inp.mouse.locked; // unlocked: right-drag orbits the camera
     if (inp.down('KeyF')) fire1 = true;
     if (pad) {
       const ax = (i) => (Math.abs(pad.axes[i] || 0) > 0.15 ? pad.axes[i] : 0);

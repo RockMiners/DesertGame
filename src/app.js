@@ -24,7 +24,7 @@ const SETTINGS_KEY = 'dustbowl-settings-v1';
 export class App {
   constructor() {
     this.canvas = document.getElementById('game');
-    this.settings = { quality: 1, volume: 0.7, music: 0.35, sens: 1, invertY: false, difficulty: 'normal', name: '', ...safeJSON(localStorage.getItem(SETTINGS_KEY)) };
+    this.settings = { quality: 1, volume: 0.7, music: 0.35, sens: 1, invertY: false, difficulty: 'normal', name: '', ...safeJSON(store.get(SETTINGS_KEY)) };
     this.audio = new Audio();
     this.mode = 'boot';
     this.menuOpen = false;
@@ -40,6 +40,10 @@ export class App {
   // ---------- boot ----------
   async boot() {
     const params = new URLSearchParams(location.search);
+    // a reload can carry instructions (new seed, continue, join) without touching the URL
+    const handoff = safeJSON(session.get('dustbowl-boot'));
+    session.set('dustbowl-boot', '');
+    if (handoff) for (const [k, v] of Object.entries(handoff)) params.set(k, v);
     const saved = this.readSave();
     this.seed = +(params.get('seed') || saved?.seed || 1234);
     const quality = params.get('quality') ? +params.get('quality') : this.settings.quality;
@@ -94,7 +98,7 @@ export class App {
       <div class="title-btns">
         <button data-act="new">🚗 New Game</button>
         ${saved ? `<button data-act="continue">▶ Continue <small>${esc(saved.name || '')} · Day ${saved.day || 1}</small></button>` : ''}
-        <button data-act="join">🌐 Join a Friend</button>
+        ${COOP_AVAILABLE ? '<button data-act="join">🌐 Join a Friend</button>' : ''}
         <button data-act="help" class="ghost">How to play</button>
       </div><div id="title-sub"></div><p class="muted small">WASD drive · mouse aim · click to fire · E interact · Esc menu</p></div>`;
     scr.classList.remove('hidden');
@@ -136,7 +140,7 @@ export class App {
 
   // ---------- starting ----------
   async startNew(opts) {
-    if (opts.seed && opts.seed !== this.seed) { location.search = `?seed=${opts.seed}&autostart=1&name=${encodeURIComponent(opts.name)}`; return; }
+    if (opts.seed && opts.seed !== this.seed) { reboot({ seed: opts.seed, autostart: 1, name: opts.name }); return; }
     this.resetTerrain();
     this.settings.difficulty = opts.difficulty || 'normal';
     this.saveSettings();
@@ -168,7 +172,7 @@ export class App {
 
   tutorialOffer() {
     const sim = this.sim;
-    const m = sim.createMission({ giver: 'hub', type: 'tutorial', title: 'Scrap & Petrol', desc: 'Drive out of the Hub, scoop up 10 scrap from the glowing junk piles in the dunes, and sell it at the Bazaar (press E in the Hub).', obj: { kind: 'deliver', res: 'scrap', amount: 10, baseId: null, x: 0, z: 0 }, reward: { caps: 60, items: { fuel: 15 } }, expires: sim.s.time + DAY_LEN * 5 });
+    const m = sim.createMission({ giver: 'hub', type: 'tutorial', title: 'Scrap & Petrol', desc: 'Drive out of the Hub, scoop up 10 scrap from the junk piles in the dunes, then bring it to the Bazaar (press E in the Hub) and hand it over.', obj: { kind: 'deliver', res: 'scrap', amount: 10, baseId: null, x: 0, z: 0 }, reward: { caps: 60, items: { fuel: 15 } }, expires: sim.s.time + DAY_LEN * 5 });
     sim.offer({ from: 'hub', title: 'Welcome to the Hub, Sugar', text: `"You look like you've been driving on fumes and hope. Here's how it works: scrap's in the dunes, petrol's precious, and nobody shoots inside my walls. Bring me 10 scrap and I'll top you up. After that? Find a faction worth riding for — or start your own." — Auntie Tallow`, choices: [{ label: 'Sounds good', action: { type: 'accept', missionId: m.id } }, { label: 'I\'ll figure it out myself' }] });
   }
 
@@ -188,12 +192,16 @@ export class App {
     if (car.hp !== undefined) { pc.hp = car.hp; pc.fuel = car.fuel; pc.ammo = car.ammo; pc.energy = car.energy; pc.cargo = { ...(car.cargo || {}) }; }
     pc.title = this.playerName;
     this.player.attach(pc);
+    if (!this.headlight) {
+      this.headlight = new THREE.SpotLight(0xfff1c1, 0, 140, 0.55, 0.6, 1.2);
+      this.game.scene.add(this.headlight, this.headlight.target);
+    }
     this.game.input.wantLock = true;
     this.lastTeam = this.sim.groupTeam();
   }
 
   // ---------- saves ----------
-  readSave() { return safeJSON(localStorage.getItem(SAVE_KEY)); }
+  readSave() { return safeJSON(store.get(SAVE_KEY)); }
   save() {
     if (this.net?.isClient || !this.sim.s) return;
     const c = this.player.car;
@@ -203,12 +211,12 @@ export class App {
       player: { design: c.design, hp: c.alive ? c.hp : c.stats.hp, fuel: c.fuel, ammo: c.ammo, energy: c.energy, cargo: c.cargo, x: c.body.pos.x, z: c.body.pos.z, heading: c.body.heading() },
       tracked: this.trackedMission, waypoint: this.waypoint, pickups: this.game.pickups.serialize(), difficulty: this.settings.difficulty,
     };
-    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) { this.ui.toast('Could not save: storage full?', 'bad'); console.error(e); }
+    if (!store.set(SAVE_KEY, JSON.stringify(data))) this.ui.toast('Could not save (browser storage unavailable or full).', 'bad');
   }
   continueGame() {
     const data = this.readSave();
     if (!data) return;
-    if (data.seed !== this.seed) { location.search = `?seed=${data.seed}&continue=1`; return; }
+    if (data.seed !== this.seed) { reboot({ seed: data.seed, continue: 1 }); return; }
     this.resetTerrain();
     this.sim.load(data.sim);
     for (const e of this.sim.s.terrainEdits) this.game.terrain.flatten(...e);
@@ -230,13 +238,13 @@ export class App {
     this.game.terrainR.refreshDirty();
     for (const c of this.world.colliders.all) c.dead = false;
   }
-  saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings)); }
+  saveSettings() { store.set(SETTINGS_KEY, JSON.stringify(this.settings)); }
   applySettings() {
     this.audio.setVolume(this.settings.volume, this.settings.music);
     this.game.director.setDifficulty(this.settings.difficulty);
     this.game.fx.quality = this.settings.quality;
   }
-  quitToTitle() { this.save(); location.search = ''; }
+  quitToTitle() { this.save(); reboot({}); }
 
   // ---------- co-op ----------
   async startHosting() {
@@ -254,7 +262,7 @@ export class App {
     this.game.net = this.net;
     try {
       const welcome = await this.net.join(code, name);
-      if (welcome.seed !== this.seed) { location.search = `?seed=${welcome.seed}&join=${code}`; return; }
+      if (welcome.seed !== this.seed) { this.net.close(); reboot({ seed: welcome.seed, join: code }); return; }
       this.sim.load(welcome.state);
       for (const e of this.sim.s.terrainEdits) this.game.terrain.flatten(...e);
       this.sim.isReplica = true;
@@ -291,6 +299,12 @@ export class App {
       if (flips + spins >= 2) this.sim.addDeed('racer', 0.2);
     });
     g.on('playerKill', (car, n) => {
+      const now = performance.now();
+      this.killStreak = now - (this.lastKill || 0) < 5000 ? (this.killStreak || 1) + 1 : 1;
+      this.lastKill = now;
+      const words = ['WRECKED!', 'DOUBLE WRECK!', 'TRIPLE WRECK!', 'SCRAPYARD SPREE!', 'UNSTOPPABLE!'];
+      this.ui.stunt(words[Math.min(words.length - 1, this.killStreak - 1)], esc(car.title || car.name));
+      this.audio.play('stunt');
       if (this.net?.isClient) return;
       const sim = this.sim;
       sim.noteKill(car.team, n);
@@ -551,7 +565,7 @@ export class App {
     if (!z.claimable && z.owner !== s.group.factionId) { this.ui.toast(`${esc(zone.name)} belongs to the ${esc(s.factions[z.owner]?.short)}. Destroy all their bases here to make it claimable.`, 'warn'); return; }
     const pf = s.factions[s.group.factionId];
     if (!pf?.isPlayer) { this.ui.open('found', { x: p.x + car.body.fwd.x * 30, z: p.z + car.body.fwd.z * 30, zoneId: zone.id }); return; }
-    if (!confirm(`Found a new base here in ${zone.name}? (80 scrap for the HQ)`)) return;
+    if (!(await this.ui.ask(`Found a new base here in ${esc(zone.name)}? The HQ costs 80 scrap (bought for you if you're short).`, '⚑ Build it'))) return;
     const r = await this.cmd('newBase', { x: p.x + car.body.fwd.x * 30, z: p.z + car.body.fwd.z * 30 });
     this.ui.toast(esc(r.msg), r.ok ? 'good' : 'warn');
     if (r.ok) { this.audio.play('fanfare'); setTimeout(() => this.ui.open('base', { baseId: r.baseId, tab: 'build' }), 400); }
@@ -595,6 +609,12 @@ export class App {
     const car = this.player.car;
     g.chase.update(dtReal, car, g.terrain, g.fx.shake, { aiming: inp.mouse.locked || inp.mouseDown(0) });
     g.sky.update(dtReal, timeOfDay(sim.s.time), car.body.pos);
+    if (this.headlight) {
+      const b = car.body, hl = this.headlight;
+      hl.intensity = car.alive ? g.sky.nightness * 55 * Math.sqrt(car.stats.size) : 0;
+      hl.position.copy(b.pos).addScaledVector(b.up, car.stats.chassis.hei + 0.4).addScaledVector(b.fwd, car.stats.chassis.len * 0.45);
+      hl.target.position.copy(b.pos).addScaledVector(b.fwd, 40).addScaledVector(b.up, -4);
+    }
     this.weather(dtReal);
     this.audio.setListener(g.camera);
     this.audio.updateEngine(car, !paused);
@@ -663,4 +683,18 @@ function slim(v) {
   try { return JSON.parse(JSON.stringify(v)); } catch { return { id: v.id, name: v.name, short: v.short, color: v.color, title: v.title }; }
 }
 function safeJSON(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
+// storage can be missing or throw (private windows, sandboxed frames): never let it break the game
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); return true; } catch { return false; } },
+};
+const session = {
+  get(k) { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { sessionStorage.setItem(k, v); } catch { /* ignore */ } },
+};
+function reboot(params) {
+  session.set('dustbowl-boot', JSON.stringify(params));
+  location.reload();
+}
+export const COOP_AVAILABLE = import.meta.env?.MODE !== 'artifact';
 export { RES_INFO, STRUCTS, portrait, CHASSIS };

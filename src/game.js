@@ -19,7 +19,7 @@ import { BIOMES } from './world/biomes.js';
 import { PROP_INFO } from './world/worldgen.js';
 
 const FIXED = 1 / 60;
-const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _ray = new THREE.Vector3(), _hit = {};
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _ray = new THREE.Vector3(), _aimDir = new THREE.Vector3(), _hit = {};
 import { HUB_SAFE_R } from './sim/constants.js';
 export { HUB_SAFE_R };
 const DESTRUCTIBLE = new Set(['cactus', 'barrel', 'sign', 'lamp', 'deadtree', 'mushroom', 'billboard', 'skull', 'pipe', 'wreck', 'palm']);
@@ -227,9 +227,16 @@ export class Game {
 
   // ---------- Aiming ----------
   computeAim(car) {
-    // ray from camera through crosshair; hit terrain/cars
+    // ray from camera through the crosshair (pointer lock) or the mouse cursor (no lock); hit terrain/cars
     const cam = this.camera;
-    const o = cam.position, d = this.chase.aimDir;
+    const o = cam.position;
+    let d = this.chase.aimDir;
+    const m = this.input.mouse;
+    this.cursorAim = !m.locked && m.x > 0;
+    if (this.cursorAim) {
+      _ray.set((m.x / innerWidth) * 2 - 1, -(m.y / innerHeight) * 2 + 1, 0.5).unproject(cam).sub(o).normalize();
+      d = _aimDir.copy(_ray);
+    }
     let tHit = 600;
     let prevAbove = true;
     for (let t = 3; t < 600; t += t < 60 ? 2 : 6) {

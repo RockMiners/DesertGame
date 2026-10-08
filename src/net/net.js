@@ -250,7 +250,14 @@ export class Net {
     car.netTarget.q.set(d.q[0], d.q[1], d.q[2], d.q[3]);
     car.netTarget.v.set(d.v[0], d.v[1], d.v[2]);
     if (!car.netInit) { car.body.pos.copy(car.netTarget.p); car.body.quat.copy(car.netTarget.q); car.netInit = true; }
+    const wasAlive = car.alive;
     car.hp = d.hp; car.alive = d.alive !== false;
+    if (wasAlive && !car.alive && car.netInit) {
+      const p = car.netTarget.p;
+      this.game.fx.explosion(p.x, p.y + 1, p.z, 1.2 + car.stats.size * 0.35);
+      this.game.fx.wreckDebris(p.x, p.y, p.z, car.design.paint || '#888', 8);
+      this.game.audio?.play('bigexplosion', p);
+    }
     car.body.controls.throttle = d.thr || 0;
     car.body.controls.steer = d.st || 0;
     car.boostVisual = !!d.b;
@@ -318,8 +325,12 @@ export class Net {
   applyFx(d) { if (d.kind === 'explosion') this.game.fx.explosion(d.x, d.y, d.z, d.s || 1); }
 
   // ---------- tick ----------
-  update(dt) {
+  update() {
     if (!this.t) return;
+    // wall-clock timers: network cadence must not slow down when the frame rate drops
+    const now = performance.now() / 1000;
+    const dt = Math.min(1, now - (this._lastNow || now));
+    this._lastNow = now;
     this.carT -= dt; this.stateT -= dt;
     const g = this.game;
     if (this.isClient) {

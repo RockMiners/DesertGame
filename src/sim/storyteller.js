@@ -491,8 +491,9 @@ const CARDS = [
     },
   },
   {
-    id: 'sundering', big: true, minDay: 7, cooldown: DAY_LEN * 4,
+    id: 'sundering', big: true, minDay: 7, cooldown: DAY_LEN * 5,
     prepare() {
+      if (aliveFactions(this).length >= 11) return null;
       const opts = aliveFactions(this, (f) => !f.isPlayer && this.factionBases(f.id).length >= 3);
       if (!opts.length) return null;
       const f = this.rng.pick(opts);

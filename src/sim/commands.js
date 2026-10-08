@@ -260,6 +260,16 @@ const COMMANDS = {
     return ok(`Took ${got} ${RES_INFO[res].name}`, { got });
   },
 
+  // hand mission cargo to whoever asked for it (Hub jobs or a faction base)
+  handIn({ cargo, at }) {
+    const before = { ...cargo };
+    const done = this.tryDeliver('host', cargo, at || 'hub');
+    if (!done.length) return no('Nobody here is waiting for that cargo.');
+    const used = {};
+    for (const k of Object.keys(before)) { const d = before[k] - (cargo[k] || 0); if (d > 0) used[k] = d; }
+    return ok(`Delivered: ${done.map((m) => m.title).join(', ')}`, { used });
+  },
+
   sell({ res, n, at }) {
     const s = this.s;
     if (n <= 0) return no('Nothing to sell');

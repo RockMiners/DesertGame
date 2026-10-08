@@ -161,6 +161,20 @@ export class UI {
   hitMarker() { const h = this.$('hitmark'); h.classList.remove('on'); void h.offsetWidth; h.classList.add('on'); }
   damageFlash(a) { const v = this.$('vignette'); v.style.opacity = Math.min(0.85, 0.35 + a); clearTimeout(this._vt); this._vt = setTimeout(() => (v.style.opacity = 0), 160); }
 
+  // in-page yes/no (window.confirm is unavailable in embedded viewers)
+  ask(text, yes = 'Yes', no = 'Cancel') {
+    return new Promise((resolve) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'ask';
+      wrap.innerHTML = `<div class="dlg-card"><div class="dlg-body"><p>${text}</p><div class="dlg-choices"><button data-yes>${yes}</button><button class="ghost" data-no>${no}</button></div></div></div>`;
+      const done = (v) => { wrap.remove(); this.app.setMenuOpen(false, 'ask'); resolve(v); };
+      wrap.querySelector('[data-yes]').onclick = () => done(true);
+      wrap.querySelector('[data-no]').onclick = () => done(false);
+      this.root.appendChild(wrap);
+      this.app.setMenuOpen(true, 'ask');
+    });
+  }
+
   // choice dialog for storyteller offers
   offerDialog(off) {
     this.dialogQueue.push(off);
@@ -227,6 +241,9 @@ export class UI {
     // crosshair visible only when armed and not in safe zone
     const safe = g.inSafeZone(car.body.pos.x, car.body.pos.z);
     this.$('crosshair').classList.toggle('locked', !!car.lockTarget);
+    const ch = this.$('crosshair');
+    if (g.cursorAim) { ch.style.left = `${g.input.mouse.x}px`; ch.style.top = `${g.input.mouse.y}px`; }
+    else if (ch.style.left) { ch.style.left = ''; ch.style.top = ''; }
     this.$('crosshair').classList.toggle('safe', safe);
     // banner fade
     if (this.bannerT > 0) { this.bannerT -= dt; if (this.bannerT <= 0) this.$('banner').classList.remove('show'); }
