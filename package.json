@@ -1,0 +1,21 @@
+{
+  "name": "dune-bash",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:single": "vite build --mode single",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "peerjs": "1.5.5",
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "vite": "6.3.5",
+    "vite-plugin-singlefile": "2.3.0"
+  }
+}
