@@ -241,7 +241,8 @@ export class Bridge {
     const sim = this.sim;
     const set = new Set();
     this.guardBases.set(b.id, set);
-    const gar = sim.garrison(b).slice(0, Math.min(6, 2 + b.level));
+    // leaders only ride out to defend their own capital (a boss fight worth remembering)
+    const gar = sim.garrison(b).filter((n) => n.role !== 'leader' || b.capital).sort((a, c) => (c.role === 'leader') - (a.role === 'leader')).slice(0, Math.min(6, 2 + b.level));
     const r = (b.size * TILE) / 2 + 12;
     gar.forEach((n, i) => {
       const a = (i / gar.length) * Math.PI * 2;

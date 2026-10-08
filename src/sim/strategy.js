@@ -320,6 +320,7 @@ P.chooseOperation = function (f, myPower, stock) {
     const pact = this.pact(f.id, other.id);
     if (pact === 'alliance' || pact === 'truce') continue;
     if (!war && r > -40 && !b.scav) continue;
+    if (b.scav && this.zoneDef(b.zoneId).ring === 1 && day < 7) continue;
     if (other.isPlayer) {
       const gate = this.director_playerAttackGate ? this.director_playerAttackGate(f, b) : day >= 4;
       if (!gate) continue;

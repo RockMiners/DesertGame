@@ -424,7 +424,11 @@ export class Sim {
     const bases = this.factionBases(fid);
     if (!bases.length) return;
     const free = this.members(fid).filter((n) => !n.squadId);
-    free.forEach((n, i) => { if (!n.baseId || !this.s.bases[n.baseId]) n.baseId = bases[i % bases.length].id; });
+    const cap = this.capital(fid);
+    free.forEach((n, i) => {
+      if (n.role === 'leader' && cap) n.baseId = cap.id; // leaders hold court at the capital
+      else if (!n.baseId || !this.s.bases[n.baseId]) n.baseId = bases[i % bases.length].id;
+    });
   }
 
   ensureBeds(fid) {
@@ -468,6 +472,7 @@ export class Sim {
       else n.baseId = other ? other.id : null;
     }
     this.s.stats.basesDestroyed++;
+    this.updateZoneOwnership();
     this.emit('baseDestroyed', b, cause);
     if (!silent && !b.scav) this.chronicle('baseFell', { b, f, by: cause.team ? this.s.factions[cause.team] : null, byGroup: cause.team === this.groupTeam() });
     if (f && !f.isPlayer && f.alive && !this.factionBases(f.id).length && f.id !== 'scavvers') {
@@ -780,7 +785,8 @@ export class Sim {
     this.emit('siegeWon', sq, b);
     // claim the zone if possible
     const z = this.s.zones[b.zoneId];
-    if (f && z.claimable && sq.task.claimAfter !== false && !f.isPlayer) {
+    const protectedRing = this.zoneDef(b.zoneId).ring === 1 && this.day < 7; // leave the inner ring for the player early on
+    if (f && z.claimable && sq.task.claimAfter !== false && !f.isPlayer && !protectedRing) {
       const site = { x: b.x, z: b.z, zoneId: b.zoneId };
       const nb = this.createBase(f.id, site, 1, { auto: true, y: b.y });
       this.disbandSquad(sq, nb);
