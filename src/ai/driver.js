@@ -246,7 +246,7 @@ export class DriverAI {
       ctl.steer = this.reverseSteer;
       return;
     }
-    if (wantSpeed > 0.2 && moved / Math.max(dt, 1e-3) < 1.2 && ctl.throttle > 0.3) this.stuckT += dt; else this.stuckT = Math.max(0, this.stuckT - dt * 2);
+    if (wantSpeed > 0.2 && moved / Math.max(dt, 1e-3) < 1.2 && ctl.throttle > 0.15) this.stuckT += dt; else this.stuckT = Math.max(0, this.stuckT - dt * 2);
     if (this.stuckT > 1.4) { this.stuckT = 0; this.reverseT = 1.1 + Math.random() * 0.6; this.reverseSteer = ang > 0 ? 1 : -1; return; }
     // steer: our steer +1 turns right, which is negative angle
     let steer = clamp(-ang * 2.2, -1, 1);

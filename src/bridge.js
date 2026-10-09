@@ -10,6 +10,8 @@ import { formationSlots, slotOffset } from './ai/driver.js';
 
 const sizeOf = (n) => CHASSIS[n.design?.chassis]?.size ?? 1;
 // convoys and caravans ride nose to tail; fighting groups ride in a wedge
+// guards loop outside the compound's corners
+const guardRing = (b) => (b.size * TILE) / 2 * Math.SQRT2 + 14;
 const shapeOf = (sq) => (sq.task.type === 'convoy' || sq.task.type === 'trade' ? 'column' : 'wedge');
 
 export class Bridge {
@@ -89,7 +91,7 @@ export class Bridge {
       const active = this.guardBases.get(b.id);
       const battle = !!sim.s.squads[b.siegedBy]?.physical;
       if (!active && d < (battle ? PHYS_R * 0.85 : GUARD_R)) this.spawnGuards(b);
-      else if (active && d > (battle ? PHYS_R_OUT * 0.9 : GUARD_R_OUT)) this.despawnGuards(b);
+      else if (active && d > (battle ? PHYS_R_OUT * 0.9 : GUARD_R_OUT)) this.despawnGuards(b, true);
       b.physical = d < PHYS_R * 0.85;
       const set = this.guardBases.get(b.id);
       if (set?.size) {
@@ -277,9 +279,9 @@ export class Bridge {
     // roll out in formation on the far side of the compound from the nearest player
     let pd = Infinity, pa = 0;
     for (const c of this.playerCars()) { const d = Math.hypot(c.body.pos.x - b.x, c.body.pos.z - b.z); if (d < pd) { pd = d; pa = Math.atan2(c.body.pos.z - b.z, c.body.pos.x - b.x); } }
-    const a = pa + Math.PI, r = (b.size * TILE) / 2 + 16;
+    const a = pa + Math.PI, r = guardRing(b);
     const h = Math.atan2(-Math.sin(a), Math.cos(a)); // tangent, counter-clockwise like the patrol loop
-    const slots = formationSlots(gar.map(sizeOf), 'wedge');
+    const slots = formationSlots(gar.map(sizeOf), 'column');
     gar.forEach((n, i) => {
       const [ox, oz] = slotOffset(h, slots[i]);
       const car = this.spawnNpcCar(n, b.x + Math.cos(a) * r + ox, b.z + Math.sin(a) * r + oz, h, { guard: true, aggro: 130 });
@@ -298,7 +300,7 @@ export class Bridge {
     const lead = cars[0];
     set.lead = lead || null;
     if (!lead) return;
-    const r = (b.size * TILE) / 2 + 16;
+    const r = guardRing(b);
     if (set.alarmed) {
       for (const c of cars) { c.ai.aggro = 240; c.ai.setOrder({ type: 'guard', x: b.x, z: b.z, r: r + 4 }); }
       return;
@@ -308,14 +310,21 @@ export class Bridge {
     for (let k = 1; k <= 8; k++) { const a = a0 + (k / 8) * Math.PI * 2; points.push([b.x + Math.cos(a) * r, b.z + Math.sin(a) * r]); }
     lead.ai.aggro = 130;
     lead.ai.setOrder({ type: 'patrol', points, i: 0, x: points[0][0], z: points[0][1], speed: 0.28, radius: 12 });
-    const slots = formationSlots(cars.map((c) => c.stats.size), 'wedge');
+    // single file: a wedge's inner wing would cut through the compound on such a tight loop
+    const slots = formationSlots(cars.map((c) => c.stats.size), 'column');
     cars.forEach((c, i) => { if (i) { c.ai.aggro = 130; c.ai.setOrder({ type: 'follow', leader: lead, offset: slots[i] }); } });
   }
 
-  despawnGuards(b) {
+  // onlyUnseen: guards still near a player (say, chasing them) stay until they are out of sight
+  despawnGuards(b, onlyUnseen = false) {
     const set = this.guardBases.get(b.id);
-    if (set) for (const id of set) { const c = this.npcCars.get(id); if (c && c.guard) this.despawnCar(c, this.sim.s.npcs[id]); }
-    this.guardBases.delete(b.id);
+    if (set) for (const id of [...set]) {
+      const c = this.npcCars.get(id);
+      if (onlyUnseen && c?.alive && this.nearestPlayerDist(c.body.pos.x, c.body.pos.z) < 220) continue;
+      if (c && c.guard) this.despawnCar(c, this.sim.s.npcs[id]);
+      set.delete(id);
+    }
+    if (!onlyUnseen || !set?.size) this.guardBases.delete(b.id);
   }
 
   onBaseDestroyed(b) {

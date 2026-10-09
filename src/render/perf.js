@@ -31,6 +31,8 @@ export class AdaptiveQuality {
     this.minAvg = 1e9; // best sustained frame time seen ~ display refresh interval
     this.t = 0; this.good = 0; this.sinceUp = 99; this.upHold = this.holdUp;
     this.grace = opts.grace ?? 3; // ignore shader-compile hitches right after load
+    this.trial = null; // a step down is kept only if it actually made frames faster
+    this.downBlock = 0; this.downHold = 20;
     this._enabled = opts.enabled ?? true;
   }
 
@@ -60,10 +62,25 @@ export class AdaptiveQuality {
     this.t += dtReal;
     if (this.t < this.interval) return;
     this.t = 0;
+    this.downBlock = Math.max(0, this.downBlock - this.interval);
+    if (this.trial) {
+      const tr = this.trial;
+      this.trial = null;
+      if (this.avg > tr.before * 0.9) {
+        // no faster at lower quality: the frame rate is capped (30 Hz power saving, a throttled frame)
+        // or the CPU is the bottleneck. Put the quality back and stop trying for a while.
+        this.prScale = tr.pr; this.fxScale = tr.fx; this.apply();
+        this.downBlock = this.downHold; this.downHold = Math.min(240, this.downHold * 2);
+        this.good = 0;
+        return;
+      }
+    }
     if (this.avg > this.downMs) {
+      if (this.downBlock > 0) return;
       if (this.prScale <= this.prFloor && this.fxScale <= this.fxFloorScale()) return;
       // dropping right after a raise means that level is too much: wait longer before trying again
       if (this.sinceUp < this.interval * 3) this.upHold = Math.min(60, this.upHold * 2);
+      this.trial = { before: this.avg, pr: this.prScale, fx: this.fxScale };
       this.prScale = Math.max(this.prFloor, this.prScale * 0.85);
       this.fxScale = Math.max(this.fxFloorScale(), this.fxScale * 0.85);
       this.good = 0;

@@ -85,7 +85,7 @@ P.factionThink = function (f) {
   }
 
   // 3. War planning
-  const ops = Object.values(s.squads).filter((q) => ['attack', 'claim', 'raidBase'].includes(q.task.type));
+  const ops = Object.values(s.squads).filter((q) => ['attack', 'claim', 'raidBase'].includes(q.task.type) && aiTraffic(s, q));
   const activeOps = ops.filter((q) => q.factionId === f.id).length;
   const opsCap = 1 + (T.ambition + T.aggression > 1.4 ? 1 : 0);
   if (activeOps < opsCap && ops.length < MAX_OPS) {
@@ -232,6 +232,8 @@ P.aiRecruit = function (f, bases) {
 
 // World-wide limits keep the roads readable: a few purposeful convoys rather than a stream of lone trucks
 const MAX_TRADE = 3, MAX_CONVOY = 3, MAX_OPS = 4;
+// the world-wide caps keep AI traffic down; the player's own routes and mission squads don't use them up
+const aiTraffic = (s, q) => !s.factions[q.factionId]?.isPlayer && !q.missionId;
 
 P.aiCaravans = function (f, bases, stock) {
   const s = this.s;
@@ -247,7 +249,7 @@ P.aiCaravans = function (f, bases, stock) {
     return crew.length >= 2 || (crew.length && this.members(f.id).length < 4) ? crew : null;
   };
   // supply convoy from an outlying base with a real stockpile to the capital
-  if (s.time >= f.nextConvoy && all.filter((q) => q.task.type === 'convoy').length < MAX_CONVOY) {
+  if (s.time >= f.nextConvoy && all.filter((q) => q.task.type === 'convoy' && aiTraffic(s, q)).length < MAX_CONVOY) {
     for (const b of bases) {
       if (b === cap) continue;
       const total = Object.values(b.storage).reduce((t, v) => t + v, 0);
@@ -263,7 +265,7 @@ P.aiCaravans = function (f, bases, stock) {
     }
   }
   // trade caravan to the Hub: sell the most valuable surplus
-  if (s.time >= f.nextTrade && all.filter((q) => q.task.type === 'trade').length < MAX_TRADE) {
+  if (s.time >= f.nextTrade && all.filter((q) => q.task.type === 'trade' && aiTraffic(s, q)).length < MAX_TRADE) {
     const mem = this.members(f.id).length;
     const keep = { food: mem * 2, water: mem * 2, fuel: 60, ammo: 80, scrap: 120 };
     const cargo = {};

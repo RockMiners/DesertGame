@@ -659,7 +659,7 @@ export class Sim {
         sq.cargo = {};
         if (f) f.treasury += caps;
         const m = s.missions[sq.missionId];
-        if (m?.obj.kind === 'escortSquad') m.obj.arrived = true;
+        if (m?.obj.kind === 'escortSquad' && m.status === 'active') m.obj.arrived = true;
         this.emit('caravanSold', sq, caps);
         this.squadReturn(sq);
         break;
@@ -693,7 +693,13 @@ export class Sim {
   }
 
   squadReturn(sq) {
-    const home = this.s.bases[sq.homeBaseId] || this.capital(sq.factionId);
+    let home = this.s.bases[sq.homeBaseId] || this.capital(sq.factionId);
+    if (this.s.factions[sq.factionId]?.bandit) {
+      // a gang never treks across the map (and through the Hub) to some far camp: nearest camp or they scatter
+      home = null;
+      let bd = 900;
+      for (const b of this.factionBases(sq.factionId)) { const d = Math.hypot(b.x - sq.x, b.z - sq.z); if (d < bd) { bd = d; home = b; } }
+    }
     if (!home) { // nowhere to go: they become drifters
       for (const m of sq.members) { const n = this.s.npcs[m]; if (n) { n.squadId = null; } }
       delete this.s.squads[sq.id];
