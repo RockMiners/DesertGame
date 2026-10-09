@@ -13,6 +13,19 @@ export function gpuName(renderer) {
   } catch { return 'unknown'; }
 }
 
+ // Ask a throwaway context which GPU the browser will use, before the game creates its own
+// (anti-aliasing can only be chosen at creation time).
+export function probeGpu() {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2') || document.createElement('canvas').getContext('webgl');
+    if (!gl) return '';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return name;
+  } catch { return ''; }
+}
+
 export const isSoftwareGpu = (name) => /swiftshader|llvmpipe|softpipe|basic render|software/i.test(name || '');
 
 export class PerfStats {
@@ -61,7 +74,7 @@ export class PerfStats {
       `${Math.round(1000 / avg)} fps   ${avg.toFixed(1)} ms avg   ${worst.toFixed(0)} ms worst`,
       `render ${c?.width}x${c?.height} (${mp.toFixed(1)} MP)  ratio ${r?.getPixelRatio().toFixed(2)}  fx ${(g?.fx?.quality ?? 1).toFixed(2)}`,
       `draw calls ${info?.calls ?? '?'}  cars ${g?.cars.length ?? 0}`,
-      `gpu ${this.gpu || '?'}`,
+      `gpu ${this.gpu || '?'}${isSoftwareGpu(this.gpu) ? '  <- SOFTWARE: no graphics card in use' : ''}`,
       `build ${BUILD}`,
     ];
     const net = this.app.net;

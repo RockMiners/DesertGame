@@ -111,5 +111,6 @@ test/               headless sim tests (20 simulated days, faction founding)
 - The world is one 3 km map. Content is procedural, but the map doesn't grow.
 - In co-op, the host's world is authoritative and the game never pauses while friends are connected. Pickups are per-player, so two players can both grab the same pile. Beams and tesla arcs are only drawn on the shooter's screen.
 - PeerJS needs its public broker to be reachable to set up a connection. Some corporate networks block it; very strict NATs may also need a TURN relay.
+- If the game is choppy, press `F3`. If the `gpu` line says "Microsoft Basic Render Driver", "SwiftShader" or "llvmpipe", the browser isn't using your graphics card: turn on *Use graphics acceleration when available* in the browser's settings and restart it (check `chrome://gpu` or `edge://gpu`). The game detects this and drops to Potato graphics, but software rendering stays slow.
 - The host should keep the game tab open. A background tab keeps simulating (a worker timer drives it), but browsers may still slow it down after a while.
 - Balance is a first pass. The Iron Dominion tends to snowball if nobody stops it, which is arguably the point.

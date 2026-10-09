@@ -40,6 +40,7 @@ export class Game {
     this.friendlyFire = false;
     this.listeners = {};
     this.quality = opts.quality ?? 1;
+    this.softwareGpu = !!opts.softwareGpu;
     this._env = { daylight: 1, time: 0, fuelMult: 1, onRefuel: null };
     this._onRefuel = (n) => this.ui?.toast(`Refuelled ${Math.round(n)} L from cargo`, 'info');
   }
@@ -93,7 +94,9 @@ export class Game {
   pixelRatio() {
     const dpr = devicePixelRatio || 1, q = this.quality;
     const maxRatio = q >= 1 ? 1.75 : q > 0.5 ? 1.25 : 1;
-    const budget = (q >= 1 ? 2.4 : q > 0.5 ? 1.6 : 1.0) * 1e6;
+    let budget = (q >= 1 ? 2.4 : q > 0.5 ? 1.6 : 1.0) * 1e6;
+    // no graphics card in use (software rendering): every pixel costs CPU time, whatever the setting
+    if (this.softwareGpu) budget = Math.min(budget, 0.7e6);
     const fit = Math.sqrt(budget / Math.max(1, innerWidth * innerHeight));
     return Math.max(0.5, Math.min(dpr, maxRatio, fit));
   }

@@ -47,8 +47,12 @@ export class AdaptiveQuality {
 
   update(dtReal) {
     // someone else (settings menu) changed fx quality or pixel ratio: adopt it as the new base
-    if (this.fx && this.fx.quality !== this._fxSet) { this.fxBase = this.fx.quality; this.apply(); }
-    if (this.renderer.getPixelRatio() !== this._prSet) { this.basePR = this.renderer.getPixelRatio(); this.apply(); }
+    // adopt both outside changes before re-applying: applying after only the first would put the old
+    // pixel ratio back over a new one (a graphics-setting change alters both at once)
+    let outside = false;
+    if (this.fx && this.fx.quality !== this._fxSet) { this.fxBase = this.fx.quality; outside = true; }
+    if (this.renderer.getPixelRatio() !== this._prSet) { this.basePR = this.renderer.getPixelRatio(); outside = true; }
+    if (outside) this.apply();
     if (!this._enabled) return;
     if (!(dtReal > 0) || dtReal > 0.25 || (typeof document !== 'undefined' && document.hidden)) { this.good = 0; return; }
     if (this.grace > 0) { this.grace -= dtReal; return; }

@@ -18,7 +18,7 @@ import { lootText } from './world/pickups.js';
 import { RES_INFO } from './world/biomes.js';
 import { HELP_HTML } from './ui/menus.js';
 import { portrait } from './ui/portrait.js';
-import { PerfStats, BUILD, gpuName, isSoftwareGpu } from './ui/perfstats.js';
+import { PerfStats, BUILD, probeGpu, isSoftwareGpu } from './ui/perfstats.js';
 
 const SAVE_KEY = 'dustbowl-save-v1';
 const SETTINGS_KEY = 'dustbowl-settings-v1';
@@ -48,9 +48,13 @@ export class App {
     if (handoff) for (const [k, v] of Object.entries(handoff)) params.set(k, v);
     const saved = this.readSave();
     this.seed = +(params.get('seed') || saved?.seed || 1234);
+    // hardware acceleration off: the browser draws on the CPU, so start on Potato (no anti-aliasing,
+    // no shadows, fewer pixels) unless the player picked a setting themselves
+    this.softwareGpu = isSoftwareGpu(probeGpu());
+    if (this.softwareGpu && !params.get('quality') && !this.settings.qualityChosen && this.settings.quality > 0.3) this.settings.quality = 0.3;
     const quality = params.get('quality') ? +params.get('quality') : this.settings.quality;
     this.showLoading('Generating the wasteland…', 0.02);
-    this.game = new Game(this.canvas, { quality });
+    this.game = new Game(this.canvas, { quality, softwareGpu: this.softwareGpu });
     await this.game.init(this.seed, (m, p) => this.showLoading(m, p));
     this.world = this.game.world;
     this.origHeights = this.game.terrain.heights.slice();
@@ -69,12 +73,6 @@ export class App {
     this.hookGameEvents();
     this.initCoop();
     this.stats = new PerfStats(this);
-    // hardware acceleration off: the browser draws on the CPU and nothing else matters as much
-    this.softwareGpu = isSoftwareGpu(gpuName(this.game.renderer));
-    if (this.softwareGpu && !params.get('quality') && !this.settings.qualityChosen && this.settings.quality > 0.3) {
-      this.settings.quality = 0.3;
-      this.game.setQuality(0.3);
-    }
     this.hideLoading();
     this.last = performance.now();
     requestAnimationFrame((t) => this.loop(t));
