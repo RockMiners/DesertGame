@@ -18,6 +18,7 @@ import { lootText } from './world/pickups.js';
 import { RES_INFO } from './world/biomes.js';
 import { HELP_HTML } from './ui/menus.js';
 import { portrait } from './ui/portrait.js';
+import { PerfStats } from './ui/perfstats.js';
 
 const SAVE_KEY = 'dustbowl-save-v1';
 const SETTINGS_KEY = 'dustbowl-settings-v1';
@@ -67,6 +68,7 @@ export class App {
     this.game.preStep = (dt) => { this.player.update(dt); this.net?.preStep(dt); };
     this.hookGameEvents();
     this.initCoop();
+    this.stats = new PerfStats(this);
     this.hideLoading();
     this.last = performance.now();
     requestAnimationFrame((t) => this.loop(t));
@@ -746,6 +748,7 @@ export class App {
     this.audio.updateMusic(Math.min(1, hostiles / 3), g.sky.nightness);
     this.net?.update(dtReal);
     this.ui.update(dtReal);
+    this.stats.frame();
     // death
     if (!car.alive && this.deadT > 0) { this.deadT -= dtReal; if (this.deadT <= 0) this.showDeathScreen(); }
     // fuel warning

@@ -636,7 +636,8 @@ export const MENUS = {
         <label>Volume <input type="range" min="0" max="1" step="0.05" value="${set.volume}" data-input="volume"/></label>
         <label>Music <input type="range" min="0" max="1" step="0.05" value="${set.music}" data-input="music"/></label>
         <label>Mouse sensitivity <input type="range" min="0.3" max="2.5" step="0.1" value="${set.sens}" data-input="sens"/></label>
-        <label><input type="checkbox" data-change="invertY" ${set.invertY ? 'checked' : ''}/> Invert mouse Y</label></div>`;
+        <label><input type="checkbox" data-change="invertY" ${set.invertY ? 'checked' : ''}/> Invert mouse Y</label>
+        <label><input type="checkbox" data-change="showStats" ${set.showStats ? 'checked' : ''}/> Show performance stats (F3)</label></div>`;
       if (tab === 'controls') return HELP_HTML;
       if (tab === 'coop') {
         if (app.net) return app.net.statusHTML();
@@ -664,6 +665,7 @@ export const MENUS = {
       quality(v) { this.app.settings.quality = +v; this.app.saveSettings(); this.app.applySettings(); },
       difficulty(v) { this.app.settings.difficulty = v; this.app.saveSettings(); this.app.applySettings(); },
       invertY(v, el) { this.app.settings.invertY = el.checked; this.app.saveSettings(); },
+      showStats(v, el) { this.app.stats.setVisible(el.checked); this.app.settings.showStats = el.checked; this.app.saveSettings(); },
     },
     inputs: {
       volume(v) { this.app.settings.volume = +v; this.app.saveSettings(); this.app.applySettings(); },
