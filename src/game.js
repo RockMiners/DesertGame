@@ -57,7 +57,7 @@ export class Game {
     progress('Painting the wasteland...', 0.45);
     await tick();
     const renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: this.quality > 0.5, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, this.quality > 0.5 ? 1.75 : 1));
+    renderer.setPixelRatio(this.pixelRatio());
     renderer.setSize(innerWidth, innerHeight);
     renderer.shadowMap.enabled = this.quality > 0.3;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -88,7 +88,18 @@ export class Game {
     this.perf = new AdaptiveQuality(this.renderer, { fx: this.fx, enabled: this.opts.adaptive !== false });
   }
 
+  // Sharp on small or high-DPI windows, but never more than a budget of pixels per frame: a maximised
+  // window on a 1440p or 150%-scaled screen would otherwise draw 2-4x the pixels of a 1080p one.
+  pixelRatio() {
+    const dpr = devicePixelRatio || 1;
+    const maxRatio = this.quality > 0.5 ? 1.75 : 1;
+    const budget = (this.quality > 0.5 ? 2.4 : 1.3) * 1e6;
+    const fit = Math.sqrt(budget / Math.max(1, innerWidth * innerHeight));
+    return Math.max(0.5, Math.min(dpr, maxRatio, fit));
+  }
+
   resize() {
+    this.renderer.setPixelRatio(this.pixelRatio());
     this.camera.aspect = innerWidth / innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(innerWidth, innerHeight);

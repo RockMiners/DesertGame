@@ -25,7 +25,6 @@ export class PlayerController {
     if (!car.alive || g.uiBlocking) {
       ctl.throttle = 0; ctl.steer = 0; ctl.boost = 0; ctl.handbrake = car.alive ? 1 : 0;
       car.triggers[0] = car.triggers[1] = false;
-      g.chase.orbit(inp.mouse.dx, inp.mouse.dy);
       return;
     }
     const pad = inp.pollGamepad();
@@ -45,7 +44,6 @@ export class PlayerController {
       if (bt(1) > 0.5 || bt(10) > 0.5) boost = 1;
       if (bt(5) > 0.5) fire0 = true;
       if (bt(4) > 0.5) fire1 = true;
-      g.chase.orbit(ax(2) * 14, ax(3) * 10);
       if (pad.buttons[3]?.pressed && this.flipCd <= 0) this.flip();
     }
     // smooth keyboard steering a touch so it feels analog
@@ -59,23 +57,8 @@ export class PlayerController {
     ctl.roll = (inp.down('KeyE') ? 1 : 0) - (inp.down('KeyQ') && !car.stats.flags.jump ? 1 : 0);
     car.triggers[0] = fire0;
     car.triggers[1] = fire1;
-    // camera
-    g.chase.orbit(inp.mouse.dx, inp.mouse.dy);
-    if (inp.hit('KeyC')) g.chase.mode = (g.chase.mode + 1) % 3;
-    if (inp.mouse.wheel) g.chase.dist = clamp(g.chase.dist + inp.mouse.wheel * 1.2, 5, 20);
-    // jump jets
-    if (inp.hit('KeyQ') && car.stats.flags.jump && car.jumpCd <= 0 && car.energy >= 15) {
-      car.energy -= 15;
-      car.jumpCd = 1.2;
-      car.body.vel.y += 11 + 3 / Math.sqrt(car.stats.size);
-      car.body.vel.addScaledVector(car.body.fwd, 3);
-      for (let i = 0; i < 10; i++) g.fx.flame(car.body.pos.x, car.body.pos.y, car.body.pos.z, (Math.random() - 0.5) * 6, -8, (Math.random() - 0.5) * 6);
-      g.audio?.play('jump', car.body.pos, true);
-    }
     this.flipCd = Math.max(0, this.flipCd - dt);
-    if (inp.hit('KeyR') && this.flipCd <= 0) this.flip();
     if (car.body.flipTimer > 3) this.flip();
-    if (inp.hit('KeyH')) { g.audio?.play('honk', car.body.pos, true); g.emit('honk', car); }
     // stunts: track airtime spins and flips
     const b = car.body;
     const heading = b.heading();
@@ -101,6 +84,34 @@ export class PlayerController {
     g.computeAim(car);
     if (window.app?._forceAim) { const f = window.app._forceAim; car.aimPoint.set(f.x, f.y, f.z); }
     car.aimTurrets(dt);
+  }
+
+  // Once per drawn frame: mouse look, zoom and one-shot keys. (update() runs per fixed 60 Hz physics step,
+  // while mouse movement and key taps are collected per frame: reading them there dropped them on high
+  // refresh-rate screens and applied them twice below 60 fps.)
+  frameInput(dt) {
+    const g = this.game, inp = g.input, car = this.car;
+    if (!car) return;
+    g.chase.orbit(inp.mouse.dx, inp.mouse.dy);
+    const pad = inp.gamepad;
+    if (pad) {
+      const ax = (i) => (Math.abs(pad.axes[i] || 0) > 0.15 ? pad.axes[i] : 0);
+      g.chase.orbit(ax(2) * 840 * dt, ax(3) * 600 * dt);
+    }
+    if (!car.alive || g.uiBlocking) return;
+    if (inp.hit('KeyC')) g.chase.mode = (g.chase.mode + 1) % 3;
+    if (inp.mouse.wheel) g.chase.dist = clamp(g.chase.dist + inp.mouse.wheel * 1.2, 5, 20);
+    // jump jets
+    if (inp.hit('KeyQ') && car.stats.flags.jump && car.jumpCd <= 0 && car.energy >= 15) {
+      car.energy -= 15;
+      car.jumpCd = 1.2;
+      car.body.vel.y += 11 + 3 / Math.sqrt(car.stats.size);
+      car.body.vel.addScaledVector(car.body.fwd, 3);
+      for (let i = 0; i < 10; i++) g.fx.flame(car.body.pos.x, car.body.pos.y, car.body.pos.z, (Math.random() - 0.5) * 6, -8, (Math.random() - 0.5) * 6);
+      g.audio?.play('jump', car.body.pos, true);
+    }
+    if (inp.hit('KeyR') && this.flipCd <= 0) this.flip();
+    if (inp.hit('KeyH')) { g.audio?.play('honk', car.body.pos, true); g.emit('honk', car); }
   }
 
   flip() {

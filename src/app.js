@@ -722,6 +722,7 @@ export class App {
     const inp = g.input;
     inp.mouse.dx *= this.settings.sens; inp.mouse.dy *= this.settings.sens * (this.settings.invertY ? -1 : 1);
     this.handleKeys();
+    this.player.frameInput(dtReal);
     if (!paused) {
       if (!this.net?.isClient) sim.tick(dt);
       this.bridge.update(dt);

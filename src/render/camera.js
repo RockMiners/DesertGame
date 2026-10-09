@@ -14,6 +14,10 @@ export class ChaseCamera {
     this.idle = 0;
     this.pos = new THREE.Vector3();
     this.look = new THREE.Vector3();
+    this.anchor = new THREE.Vector3(); // smoothed follow point on the car
+    this.lead = new THREE.Vector3();   // smoothed look-ahead
+    this.heading = 0;                  // smoothed car heading
+    this.lift = 0;                     // smoothed lift over terrain
     this.baseFov = 68;
     this.mode = 0; // 0 chase, 1 far, 2 hood
     this.initialized = false;
@@ -35,27 +39,32 @@ export class ChaseCamera {
     // recenter behind the car when not aiming
     if (this.idle > 2.2 && !opts.aiming) this.yaw = damp(this.yaw, 0, 1.6, dt);
     this.yaw = angleWrap(this.yaw);
-    const camYaw = heading + Math.PI + this.yaw;
     const zoomTarget = this.mode === 1 ? 1.8 : 1;
     this.zoom = damp(this.zoom, zoomTarget * (opts.zoom || 1), 4, dt);
     const dist = (this.dist + Math.sqrt(size) * 4.5 - 4 + Math.min(speed, 45) * 0.06) * this.zoom;
     const h = 2.2 + size * 1.4;
     _t.set(b.pos.x, b.pos.y + 1.2 + size * 0.9, b.pos.z);
-    const tx = _t.x + Math.sin(camYaw) * Math.cos(this.pitch) * dist;
-    const tz = _t.z + Math.cos(camYaw) * Math.cos(this.pitch) * dist;
-    let ty = _t.y + Math.sin(this.pitch) * dist + h * 0.35;
-    const gh = terrain.heightAt(tx, tz) + 1.5;
-    if (ty < gh) ty = gh;
-    if (!this.initialized) { this.pos.set(tx, ty, tz); this.look.copy(_t); this.initialized = true; }
+    // Following the car is smoothed (position and heading); the player's own orbit (yaw/pitch) is applied
+    // as-is, so mouse look responds on the very next frame instead of easing in over ~0.25 s.
+    if (!this.initialized) { this.anchor.copy(_t); this.heading = heading; this.lead.set(0, 0, 0); this.lift = 0; this.initialized = true; }
     const k = 1 - Math.exp(-dt * 9);
-    this.pos.x += (tx - this.pos.x) * k;
-    this.pos.z += (tz - this.pos.z) * k;
-    this.pos.y += (ty - this.pos.y) * (1 - Math.exp(-dt * 6));
+    this.anchor.x += (_t.x - this.anchor.x) * k;
+    this.anchor.z += (_t.z - this.anchor.z) * k;
+    this.anchor.y += (_t.y - this.anchor.y) * (1 - Math.exp(-dt * 6));
+    this.heading += angleWrap(heading - this.heading) * (1 - Math.exp(-dt * 8));
+    const camYaw = this.heading + Math.PI + this.yaw;
+    const tx = this.anchor.x + Math.sin(camYaw) * Math.cos(this.pitch) * dist;
+    const tz = this.anchor.z + Math.cos(camYaw) * Math.cos(this.pitch) * dist;
+    const ty = this.anchor.y + Math.sin(this.pitch) * dist + h * 0.35;
+    // stay above the dunes: rise at once, settle back gently
+    const need = Math.max(0, terrain.heightAt(tx, tz) + 1.5 - ty);
+    this.lift = Math.max(need, this.lift + (need - this.lift) * (1 - Math.exp(-dt * 4)));
+    this.pos.set(tx, ty + this.lift, tz);
     // look slightly ahead of the car
     _v.copy(b.vel).multiplyScalar(0.12);
     _v.y *= 0.3;
-    const lookT = _t.add(_v);
-    this.look.lerp(lookT, 1 - Math.exp(-dt * 12));
+    this.lead.lerp(_v, 1 - Math.exp(-dt * 12));
+    this.look.copy(this.anchor).add(this.lead);
     const cam = this.camera;
     cam.position.copy(this.pos);
     if (shake > 0) {
