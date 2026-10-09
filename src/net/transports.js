@@ -30,13 +30,46 @@ function parseWire(d, onMsg, onFast) {
 }
 
 // ---------------------------------------------------------------- PeerJS
+// Snapshots ride a truly unreliable channel opened on PeerJS's own connection (PeerJS's "reliable: false" still
+// retransmits and will queue up to 8 MB). A snapshot is replaceable: when the link is backed up we skip one
+// rather than queue stale state, so a slow upload or relay never turns into seconds of lag.
+const FAST_CHANNEL = { negotiated: true, id: 77, ordered: false, maxRetransmits: 0 };
+const BACKLOG = 16 * 1024;
+
+function openFast(conn, onData) {
+  try {
+    const ch = conn.peerConnection.createDataChannel('dd-fast', FAST_CHANNEL);
+    ch.onmessage = (e) => onData(e.data);
+    return ch;
+  } catch { return null; }
+}
+function sendFast(fastCh, ctl, str) {
+  if (fastCh?.readyState === 'open') { if (fastCh.bufferedAmount < BACKLOG) fastCh.send(str); return true; }
+  if (!ctl?.open || ctl.bufferSize || (ctl.dataChannel?.bufferedAmount || 0) > BACKLOG) return false;
+  ctl.send(str);
+  return true;
+}
+// 'direct' or 'relayed' (through a TURN server, which adds latency)
+async function routeOf(conn) {
+  try {
+    const stats = await conn.peerConnection.getStats();
+    let pair = null;
+    stats.forEach((r) => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId); });
+    if (!pair) stats.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+    const local = pair && stats.get(pair.localCandidateId);
+    return local ? (local.candidateType === 'relay' ? 'relayed' : 'direct') : null;
+  } catch { return null; }
+}
+
 export class PeerTransport extends Base {
-  constructor() { super(); this.kind = 'peer'; this.conns = new Map(); this.fastLimit = 14000; this.sectionsViaDb = false; }
+  constructor() { super(); this.kind = 'peer'; this.conns = new Map(); this.fastLimit = 8000; this.sectionsViaDb = false; }
 
   async openPeer(id) {
     const { default: Peer } = await import('peerjs');
     return new Promise((resolve, reject) => {
-      const peer = id ? new Peer(id, { debug: 0 }) : new Peer({ debug: 0 });
+      // globalThis.DD_PEER_OPTIONS lets tests point PeerJS at a local signalling server
+      const opts = { debug: 0, ...(globalThis.DD_PEER_OPTIONS || {}) };
+      const peer = id ? new Peer(id, opts) : new Peer(opts);
       let opened = false;
       peer.on('open', () => { opened = true; resolve(peer); });
       peer.on('error', (e) => {
@@ -50,17 +83,19 @@ export class PeerTransport extends Base {
   async host(code) {
     this.peer = await this.openPeer(PEER_PREFIX + code);
     this.peer.on('connection', (conn) => {
-      const pid = conn.peer, ch = conn.metadata?.ch === 'fast' ? 'fast' : 'ctl';
+      const pid = conn.peer;
+      const onData = (d) => parseWire(d, (o) => this.onMsg(pid, o), (str) => this.onFast(pid, str));
       conn.on('open', () => {
-        const p = this.conns.get(pid) || {};
-        p[ch] = conn;
-        this.conns.set(pid, p);
-        if (ch === 'ctl') this.onJoin(pid, String(conn.metadata?.name || 'Friend').slice(0, 20));
+        this.conns.set(pid, { ctl: conn, fastCh: openFast(conn, onData) });
+        this.onJoin(pid, String(conn.metadata?.name || 'Friend').slice(0, 20));
       });
-      conn.on('data', (d) => parseWire(d, (o) => this.onMsg(pid, o), (s) => this.onFast(pid, s)));
+      conn.on('data', onData);
       conn.on('close', () => {
         const p = this.conns.get(pid);
-        if (ch === 'ctl' && p) { this.conns.delete(pid); try { p.fast?.close(); } catch { /* */ } this.onLeave(pid); }
+        if (p?.ctl !== conn) return;
+        this.conns.delete(pid);
+        try { p.fastCh?.close(); } catch { /* */ }
+        this.onLeave(pid);
       });
       conn.on('error', () => {});
     });
@@ -72,13 +107,11 @@ export class PeerTransport extends Base {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('Could not reach the host. Check the code, and that they opened their game to friends.')), 15000);
       this.connectFail = () => { clearTimeout(timer); reject(new Error(`No game is open with code ${code}.`)); };
-      this.ctl = this.peer.connect(hostId, { reliable: true, serialization: 'raw', metadata: { ch: 'ctl', name } });
-      this.fastConn = this.peer.connect(hostId, { reliable: false, serialization: 'raw', metadata: { ch: 'fast' } });
-      for (const c of [this.ctl, this.fastConn]) {
-        c.on('data', (d) => parseWire(d, (o) => this.onMsg(o), (s) => this.onFast(s)));
-        c.on('error', () => {});
-      }
-      this.ctl.on('open', () => { clearTimeout(timer); resolve(); });
+      this.ctl = this.peer.connect(hostId, { reliable: true, serialization: 'raw', metadata: { name } });
+      const onData = (d) => parseWire(d, (o) => this.onMsg(o), (str) => this.onFast(str));
+      this.ctl.on('data', onData);
+      this.ctl.on('error', () => {});
+      this.ctl.on('open', () => { clearTimeout(timer); this.fastCh = openFast(this.ctl, onData); resolve(); });
       this.ctl.on('close', () => { if (!this.closed) this.onLost('closed'); });
     });
   }
@@ -89,8 +122,9 @@ export class PeerTransport extends Base {
     if (c?.open) c.send('J' + JSON.stringify(obj));
   }
   sendAll(obj) { const s = 'J' + JSON.stringify(obj); for (const p of this.conns.values()) if (p.ctl?.open) p.ctl.send(s); }
-  fastTo(pid, str) { const p = this.conns.get(pid); const c = p?.fast?.open ? p.fast : p?.ctl; if (c?.open) c.send('F' + str); }
-  fast(str) { const c = this.fastConn?.open ? this.fastConn : this.ctl; if (c?.open) c.send('F' + str); }
+  fastTo(pid, str) { const p = this.conns.get(pid); return sendFast(p?.fastCh, p?.ctl, 'F' + str); }
+  fast(str) { return sendFast(this.fastCh, this.ctl, 'F' + str); }
+  async route(pid) { const c = pid ? this.conns.get(pid)?.ctl : this.ctl; return c ? routeOf(c) : null; }
   close() { this.closed = true; try { this.peer?.destroy(); } catch { /* */ } }
 }
 

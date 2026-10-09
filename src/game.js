@@ -91,11 +91,23 @@ export class Game {
   // Sharp on small or high-DPI windows, but never more than a budget of pixels per frame: a maximised
   // window on a 1440p or 150%-scaled screen would otherwise draw 2-4x the pixels of a 1080p one.
   pixelRatio() {
-    const dpr = devicePixelRatio || 1;
-    const maxRatio = this.quality > 0.5 ? 1.75 : 1;
-    const budget = (this.quality > 0.5 ? 2.4 : 1.3) * 1e6;
+    const dpr = devicePixelRatio || 1, q = this.quality;
+    const maxRatio = q >= 1 ? 1.75 : q > 0.5 ? 1.25 : 1;
+    const budget = (q >= 1 ? 2.4 : q > 0.5 ? 1.6 : 1.0) * 1e6;
     const fit = Math.sqrt(budget / Math.max(1, innerWidth * innerHeight));
     return Math.max(0.5, Math.min(dpr, maxRatio, fit));
+  }
+
+  // Graphics setting, applied live (anti-aliasing is fixed when the page loads)
+  setQuality(q) {
+    this.quality = q;
+    this.fx.quality = q;
+    const shadows = q > 0.3;
+    if (this.renderer.shadowMap.enabled !== shadows) {
+      this.renderer.shadowMap.enabled = shadows;
+      this.scene.traverse((o) => { if (o.material) for (const m of [].concat(o.material)) m.needsUpdate = true; });
+    }
+    this.resize();
   }
 
   resize() {

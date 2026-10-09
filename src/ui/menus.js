@@ -631,7 +631,7 @@ export const MENUS = {
     render(args, tab) {
       const app = this.app, set = app.settings;
       if (tab === 'main') return `<div class="center-msg"><button data-action="resume">▶ Resume</button><button data-action="save">💾 Save game</button><button data-action="load">📂 Load last save</button><button class="ghost" data-action="quit">🏠 Quit to title</button><p class="muted small">The game autosaves when you sleep and every few minutes.</p></div>`;
-      if (tab === 'settings') return `<div class="form"><label>Graphics <select data-change="quality">${[['0.3', 'Potato'], ['0.6', 'Medium'], ['1', 'High']].map(([v, l]) => `<option value="${v}" ${+v === set.quality ? 'selected' : ''}>${l}</option>`).join('')}</select> <small>(reload to fully apply)</small></label>
+      if (tab === 'settings') return `<div class="form"><label>Graphics <select data-change="quality">${[['0.3', 'Potato'], ['0.6', 'Medium'], ['1', 'High']].map(([v, l]) => `<option value="${v}" ${+v === set.quality ? 'selected' : ''}>${l}</option>`).join('')}</select> <small>(lower it if the game feels choppy)</small></label>
         <label>Difficulty <select data-change="difficulty">${Object.entries(DIFFICULTY).map(([k, d]) => `<option value="${k}" ${k === set.difficulty ? 'selected' : ''}>${d.name}</option>`).join('')}</select></label>
         <label>Volume <input type="range" min="0" max="1" step="0.05" value="${set.volume}" data-input="volume"/></label>
         <label>Music <input type="range" min="0" max="1" step="0.05" value="${set.music}" data-input="music"/></label>
@@ -662,7 +662,7 @@ export const MENUS = {
       copyInvite() { copyText(this.app.net?.inviteLink() || '', this); },
     },
     changes: {
-      quality(v) { this.app.settings.quality = +v; this.app.saveSettings(); this.app.applySettings(); },
+      quality(v) { this.app.settings.quality = +v; this.app.settings.qualityChosen = true; this.app.saveSettings(); this.app.applySettings(); },
       difficulty(v) { this.app.settings.difficulty = v; this.app.saveSettings(); this.app.applySettings(); },
       invertY(v, el) { this.app.settings.invertY = el.checked; this.app.saveSettings(); },
       showStats(v, el) { this.app.stats.setVisible(el.checked); this.app.settings.showStats = el.checked; this.app.saveSettings(); },

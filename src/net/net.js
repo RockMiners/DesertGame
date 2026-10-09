@@ -215,6 +215,8 @@ export class Net {
         break;
       }
       case 'nm': if (Array.isArray(m.l)) for (const nid of m.l.slice(0, 64)) p.known.delete(nid); break;
+      case 'ping': this.t.send(pid, { t: 'pong', c: m.c }); break;
+      case 'pong': p.rtt = rttFrom(p.rtt, m.c); break;
     }
   }
 
@@ -309,6 +311,14 @@ export class Net {
       for (const [car, e] of this.ent) if (car.removed) { this.ent.delete(car); this.byNid.delete(e.nid); for (const p of this.peers.values()) p.known.delete(e.nid); }
       this.t.advertise(this.info());
     }
+    this.pingT = (this.pingT ?? 0) - dt;
+    if (this.pingT <= 0) {
+      this.pingT = 2;
+      for (const [pid, p] of this.peers) {
+        this.t.send(pid, { t: 'ping', c: performance.now() });
+        this.t.route?.(pid).then((r) => { if (r) p.route = r; });
+      }
+    }
   }
 
   publishSections(force) {
@@ -395,6 +405,8 @@ export class Net {
         break;
       }
       case 'kill': this.game.emit('playerKill', { title: String(m.n || 'someone'), name: String(m.n || '') }, null); break;
+      case 'ping': this.t.send({ t: 'pong', c: m.c }); break;
+      case 'pong': this.rtt = rttFrom(this.rtt, m.c); break;
     }
   }
 
@@ -505,6 +517,12 @@ export class Net {
       for (const [nid, car] of this.byNid) {
         if (car.removed || now - (this.seen.get(nid) || 0) > 2500) { if (!car.removed) g.removeCar(car); this.byNid.delete(nid); this.seen.delete(nid); }
       }
+    }
+    this.pingT = (this.pingT ?? 0) - dt;
+    if (this.pingT <= 0) {
+      this.pingT = 2;
+      this.t.send({ t: 'ping', c: performance.now() });
+      this.t.route?.().then((r) => { if (r) this.route = r; });
     }
   }
 
@@ -624,4 +642,10 @@ export class Net {
 }
 
 const _vel = new THREE.Vector3();
+// round-trip time from a pong carrying our own send time, lightly smoothed
+function rttFrom(prev, sent) {
+  const ms = performance.now() - Number(sent);
+  if (!(ms >= 0 && ms < 60000)) return prev;
+  return prev ? prev + (ms - prev) * 0.3 : ms;
+}
 function safe(v) { try { return v === undefined ? null : JSON.parse(JSON.stringify(v)); } catch { return null; } }

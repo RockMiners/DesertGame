@@ -18,7 +18,7 @@ import { lootText } from './world/pickups.js';
 import { RES_INFO } from './world/biomes.js';
 import { HELP_HTML } from './ui/menus.js';
 import { portrait } from './ui/portrait.js';
-import { PerfStats } from './ui/perfstats.js';
+import { PerfStats, BUILD, gpuName, isSoftwareGpu } from './ui/perfstats.js';
 
 const SAVE_KEY = 'dustbowl-save-v1';
 const SETTINGS_KEY = 'dustbowl-settings-v1';
@@ -69,6 +69,12 @@ export class App {
     this.hookGameEvents();
     this.initCoop();
     this.stats = new PerfStats(this);
+    // hardware acceleration off: the browser draws on the CPU and nothing else matters as much
+    this.softwareGpu = isSoftwareGpu(gpuName(this.game.renderer));
+    if (this.softwareGpu && !params.get('quality') && !this.settings.qualityChosen && this.settings.quality > 0.3) {
+      this.settings.quality = 0.3;
+      this.game.setQuality(0.3);
+    }
     this.hideLoading();
     this.last = performance.now();
     requestAnimationFrame((t) => this.loop(t));
@@ -124,7 +130,7 @@ export class App {
         ${saved ? `<button data-act="continue">▶ Continue <small>${esc(saved.name || '')} · Day ${saved.day || 1}</small></button>` : ''}
         <button data-act="join">🌐 Join a Friend</button>
         <button data-act="help" class="ghost">How to play</button>
-      </div><div id="title-sub"></div><p class="muted small">WASD drive · mouse aim · click to fire · E interact · Esc menu</p></div>`;
+      </div><div id="title-sub"></div><p class="muted small">WASD drive · mouse aim · click to fire · E interact · Esc menu · F3 stats</p><p class="muted small" style="opacity:.5">build ${esc(BUILD)}</p></div>`;
     scr.classList.remove('hidden');
     scr.onclick = (e) => {
       const b = e.target.closest('[data-act]');
@@ -242,6 +248,10 @@ export class App {
       this.game.scene.add(this.headlight, this.headlight.target);
     }
     this.setMenuOpen(false, 'title'); // the title backdrop blocks input; release it however play starts
+    if (this.softwareGpu && !this.warnedGpu) {
+      this.warnedGpu = true;
+      setTimeout(() => this.ui.toast('🐢 Your browser is drawing without your graphics card, so the game will be slow. Turn on "Use graphics acceleration" in your browser settings and restart it.', 'warn'), 4000);
+    }
     this.lastTeam = this.sim.groupTeam();
   }
 
@@ -288,7 +298,7 @@ export class App {
   applySettings() {
     this.audio.setVolume(this.settings.volume, this.settings.music);
     this.game.director.setDifficulty(this.settings.difficulty);
-    this.game.fx.quality = this.settings.quality;
+    this.game.setQuality(this.settings.quality);
   }
   quitToTitle() { this.save(); reboot({}); }
 
