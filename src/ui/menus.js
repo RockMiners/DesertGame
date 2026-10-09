@@ -197,7 +197,7 @@ function factionsHTML(ui) {
     const T = f.traits;
     const canJoin = f.alive && !f.isPlayer && s.group.factionId !== f.id && !myF?.isPlayer;
     return `<div class="card faction ${f.alive ? '' : 'dead'}"><div class="fc-head"><img src="${f.isPlayer ? portrait(4242, f.color, 72) : leaderPic(sim, f)}"/><div><h3 style="color:${f.color}">${esc(f.name)}</h3><div class="muted">${f.isPlayer ? 'Led by you' : esc(sim.leaderName(f))} · ${esc(f.archetype || '')}</div><i>"${esc(f.motto)}"</i></div></div>
-      ${f.alive ? `<div class="fc-stats"><span>👥 ${sim.members(f.id).length}</span><span>🏰 ${sim.factionBases(f.id).length}</span><span>🗺️ ${zones.length}</span><span>💪 ${Math.round(f.powerCache || sim.factionPower(f.id))}</span></div>
+      ${f.alive ? `<div class="fc-stats"><span>👥 ${sim.isReplica ? f.memberCount ?? 0 : sim.members(f.id).length}</span><span>🏰 ${sim.factionBases(f.id).length}</span><span>🗺️ ${zones.length}</span><span>💪 ${Math.round(f.powerCache || sim.factionPower(f.id))}</span></div>
       ${!f.isPlayer ? `<div class="traits">${['aggression', 'honor', 'greed', 'cunning', 'ambition', 'caution'].map((k) => `<div><small>${k}</small>${bar(T[k] ?? 0.5, k === 'honor' ? '#06d6a0' : k === 'aggression' ? '#ff6b6b' : '#ffd166')}</div>`).join('')}</div>` : ''}
       <div>Your standing: <b style="color:${relColor(rep)}">${relWord(rep)} (${rep})</b>${s.group.factionId === f.id && !f.isPlayer ? ` · <b>${RANKS[s.group.rank]}</b>` : ''}</div>
       <div class="pacts">${pacts || '<span class="muted">No pacts</span>'}</div>
@@ -639,8 +639,15 @@ export const MENUS = {
         <label><input type="checkbox" data-change="invertY" ${set.invertY ? 'checked' : ''}/> Invert mouse Y</label></div>`;
       if (tab === 'controls') return HELP_HTML;
       if (tab === 'coop') {
-        if (import.meta.env?.MODE === 'artifact') return `<div class="center-msg"><h3>Co-op needs the full version</h3><p>This embedded page can't open peer-to-peer connections. Run the game from its repository (<kbd>npm run dev</kbd>, or host the <kbd>dist/</kbd> build) to play with friends: one player hosts, the others join with a code.</p></div>`;
-        return app.net ? app.net.statusHTML() : `<div class="center-msg"><p>Single-player game.</p><button data-action="hostNow">🌐 Open this game to friends</button><p class="muted small">Peer-to-peer: your PC hosts the world, friends connect directly with a code. No dedicated server.</p></div>`;
+        if (app.net) return app.net.statusHTML();
+        const artifact = import.meta.env?.MODE === 'artifact';
+        const blurb = artifact
+          ? 'Friends who can open this artifact join your world from its title screen (<b>Join a Friend</b>). No codes to type, nothing to install.'
+          : 'Your browser hosts the world. You get a link: friends open it and they\'re in.';
+        const btn = app.canHost === false
+          ? '<p class="warn">Only the owner or editors of this artifact can host here. Ask them to host, then pick their game under <b>Join a Friend</b>.</p>'
+          : '<button data-action="hostNow">🌐 Open this game to friends</button>';
+        return `<div class="center-msg"><h3>Play with friends</h3><p>${blurb}</p>${btn}<p class="muted small">Friends share your crew, wallet and faction. Keep this tab open while they play.</p></div>`;
       }
       return '';
     },
@@ -650,7 +657,8 @@ export const MENUS = {
       load() { this.close(); this.app.loadSaved(); },
       quit() { this.close(); this.app.quitToTitle(); },
       async hostNow() { await this.app.startHosting(); this.refresh(); },
-      copyCode() { navigator.clipboard?.writeText(this.app.net?.code || ''); this.toast('Code copied', 'good'); },
+      copyCode() { copyText(this.app.net?.code || '', this); },
+      copyInvite() { copyText(this.app.net?.inviteLink() || '', this); },
     },
     changes: {
       quality(v) { this.app.settings.quality = +v; this.app.saveSettings(); this.app.applySettings(); },
@@ -671,3 +679,10 @@ export const HELP_HTML = `<div class="scroll help"><div class="grid2"><div><h3>D
 <div><h3>Tips</h3><ul><li>Drive over glowing piles to scavenge. Sell at the Bazaar or stash at your base.</li><li>Petrol matters — out of fuel you crawl on fumes.</li><li>Big rigs are tough and carry a lot, but sink in dunes and drink petrol.</li><li>Factions remember. Betrayals echo for days.</li></ul></div></div></div>`;
 
 export { MARKET_ACTIONS, marketHTML, dayOf, DAY_LEN, PART_TABLES, designStats, unitPrice, TILE, BUILD_ORDER, HUB_SPOTS };
+
+// clipboard access can be blocked (sandboxed frames): fall back to selecting the text for a manual copy
+function copyText(text, ui) {
+  const done = () => ui.toast('Copied!', 'good');
+  const manual = () => { const el = document.querySelector('.invite input'); if (el) { el.focus(); el.select(); } ui.toast('Press Ctrl+C to copy', 'info'); };
+  try { navigator.clipboard.writeText(text).then(done, manual); } catch { manual(); }
+}

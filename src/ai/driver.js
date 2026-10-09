@@ -4,6 +4,29 @@ import { clamp, angleWrap } from '../core/math.js';
 
 const _v = new THREE.Vector3(), _q = new THREE.Quaternion(), _t = new THREE.Vector3();
 
+// Formation offset [lateral, longitudinal] (negative = behind) rotated into world space for a leader heading
+export function slotOffset(h, off) {
+  return [-Math.cos(h) * off[0] + Math.sin(h) * off[1], Math.sin(h) * off[0] + Math.cos(h) * off[1]];
+}
+
+// Slots for a group (index 0 is the leader). Column: nose to tail, gaps sized to the cars either side.
+// Wedge: alternating sides, folding into two files after the second rank so big warbands stay compact.
+export function formationSlots(sizes, shape = 'wedge', back0 = 0) {
+  const out = [[0, 0]];
+  const sp = 9 * Math.sqrt(Math.max(1, ...sizes));
+  let back = back0;
+  for (let i = 1; i < sizes.length; i++) {
+    if (shape === 'column') {
+      back += 9 * Math.sqrt(Math.max(1, sizes[i - 1], sizes[i]));
+      out.push([0, -back]);
+    } else {
+      const rank = Math.ceil(i / 2), side = i % 2 ? 1 : -1;
+      out.push([side * sp * 0.75 * Math.min(rank, 2), -back0 - sp * rank]);
+    }
+  }
+  return out;
+}
+
 export class DriverAI {
   constructor(car, game, opts = {}) {
     this.car = car;
@@ -23,6 +46,11 @@ export class DriverAI {
     this.lastPos = new THREE.Vector3().copy(car.body.pos);
     this.fleeing = false;
     this.honk = 0;
+    this.thrS = 0; // smoothed throttle for formation driving
+    this.lsS = 0; // smoothed leader speed
+    this.overrun = false; // ahead of our formation slot: allowed to brake
+    this.slotDist = 0; // how far a follower is from its formation slot (read by the bridge)
+    this.boostWish = false;
     const ws = car.weapons;
     const hasTurret = ws.some((w) => w.kind === 'turret');
     const range = ws.reduce((m, w) => Math.max(m, w.def.range || 40), 30);
@@ -31,13 +59,16 @@ export class DriverAI {
     car.skill = this.skill;
   }
 
-  setOrder(o) { this.order = o; this.joustPhase = 0; }
+  // re-issuing the same kind of order (the bridge refreshes them) must not reset combat manoeuvres
+  setOrder(o) { if (!this.order || o.type !== this.order.type) this.joustPhase = 0; this.order = o; }
 
   update(dt) {
     const car = this.car, g = this.game, b = car.body;
     const ctl = b.controls;
     if (!car.alive) { ctl.throttle = 0; ctl.steer = 0; return; }
     if (car.stun > 0) { car.stun -= dt; ctl.throttle *= 0.9; }
+    ctl.boost = 0;
+    this.boostWish = false;
     this.think -= dt;
     if (this.think <= 0) {
       this.think = 0.25 + Math.random() * 0.15;
@@ -46,7 +77,7 @@ export class DriverAI {
     // flip recovery
     if (b.flipTimer > 1.6) b.flipUpright(g.terrain);
 
-    let dest = null, wantSpeed = 1, mode = 'move';
+    let dest = null, wantSpeed = 1, mode = 'move', hold;
     const tgt = this.target && this.target.alive ? this.target : null;
     const o = this.order;
     if (tgt && !this.fleeing) {
@@ -65,15 +96,26 @@ export class DriverAI {
       if (o.slowNear && d < 40) wantSpeed = Math.min(wantSpeed, 0.4);
     } else if (o.type === 'follow' && o.leader && o.leader.alive) {
       const L = o.leader.body;
-      const off = o.offset || [6, -10];
-      const h = L.heading();
-      const ox = Math.cos(h) * off[0] * -1 + Math.sin(h) * off[1];
-      const oz = Math.sin(h) * off[0] + Math.cos(h) * off[1];
-      dest = _t.set(L.pos.x + ox, 0, L.pos.z + oz);
-      const d = Math.hypot(dest.x - b.pos.x, dest.z - b.pos.z);
-      const ls = L.speed();
-      wantSpeed = d > 30 ? 1 : clamp((ls + d * 0.6) / Math.max(10, car.stats.topSpeed), 0, 1);
-      if (d < 5 && ls < 2) wantSpeed = 0;
+      const h = L.heading(), fx = Math.sin(h), fz = Math.cos(h);
+      const [ox, oz] = slotOffset(h, o.offset || [6, -10]);
+      const sx = L.pos.x + ox, sz = L.pos.z + oz;
+      const d = Math.hypot(sx - b.pos.x, sz - b.pos.z);
+      const along = (sx - b.pos.x) * fx + (sz - b.pos.z) * fz; // + = we trail our slot
+      const ls = (this.lsS += (Math.max(0, L.forwardSpeed()) - this.lsS) * Math.min(1, dt * 2));
+      this.slotDist = d;
+      this.overrun = along < -6;
+      if (d > 30) {
+        // dropped out of formation: flat out (nitro too, if fitted) back to the slot
+        dest = _t.set(sx + fx * 6, 0, sz + fz * 6);
+        wantSpeed = 1;
+        this.boostWish = true;
+      } else {
+        // in formation: aim ahead of the slot along the leader's heading, match its pace and close the gap gently
+        const look = clamp(6 + ls * 0.7, 8, 24) + Math.max(0, -along);
+        dest = _t.set(sx + fx * look, 0, sz + fz * look);
+        hold = d < 4 && ls < 1.5 ? 0 : Math.max(0, ls + clamp(along, -15, 20) * 0.45);
+        wantSpeed = clamp(hold / Math.max(10, car.stats.topSpeed), 0, 1);
+      }
     } else if (o.type === 'siege') {
       // circle the compound and shoot the buildings, turrets first
       const st = this.structTarget;
@@ -83,14 +125,15 @@ export class DriverAI {
       wantSpeed = 0.6;
       mode = 'fight';
     } else if (o.type === 'guard') {
-      dest = _t.set(o.x + Math.cos(g.time * 0.05 + car.id.length) * (o.r || 30), 0, o.z + Math.sin(g.time * 0.05 + car.id.length) * (o.r || 30));
+      const a = g.time * 0.05 + (car.id.charCodeAt(car.id.length - 1) % 7); // spread guards round the ring
+      dest = _t.set(o.x + Math.cos(a) * (o.r || 30), 0, o.z + Math.sin(a) * (o.r || 30));
       wantSpeed = 0.35;
     } else {
       wantSpeed = 0;
     }
     if (!dest) { ctl.throttle = 0; ctl.steer = 0; ctl.handbrake = 1; this.fireControl(null, dt); return; }
     ctl.handbrake = 0;
-    this.drive(dest, wantSpeed, dt, mode);
+    this.drive(dest, wantSpeed, dt, mode, mode === 'move' ? hold : undefined);
     if (!tgt && this.structTarget && !this.fleeing) this.fireAtStructure(this.structTarget, dt);
     else this.fireControl(tgt, dt);
   }
@@ -101,11 +144,16 @@ export class DriverAI {
     if (g.inSafeZone(b.pos.x, b.pos.z)) { this.target = null; return; }
     let best = null, bestScore = Infinity;
     const range = this.order.aggro ?? this.aggro;
+    // followers only fight what threatens the group: targets near their leader
+    const o = this.order;
+    const anchor = o.type === 'follow' && o.leader?.alive ? o.leader.body.pos : null;
+    const leash = o.leash ?? 120;
     for (const c of g.cars) {
       if (c === car || !c.alive || !g.hostile(car, c)) continue;
       if (g.inSafeZone(c.body.pos.x, c.body.pos.z)) continue;
       const d = c.body.pos.distanceTo(b.pos);
       if (d > range) continue;
+      if (anchor && c.body.pos.distanceTo(anchor) > leash * (c === car.lastHitBy ? 1.5 : 1)) continue;
       let score = d;
       if (c === car.lastHitBy && g.time - car.lastHitTime < 8) score *= 0.4;
       if (this.order.focus && c.id === this.order.focus) score *= 0.3;
@@ -159,7 +207,8 @@ export class DriverAI {
     return _t;
   }
 
-  drive(dest, wantSpeed, dt, mode) {
+  // hold: optional target speed (m/s) for smooth formation keeping instead of throttle-or-brake
+  drive(dest, wantSpeed, dt, mode, hold) {
     const car = this.car, g = this.game, b = car.body, ctl = b.controls;
     const T = g.terrain;
     _v.set(dest.x - b.pos.x, 0, dest.z - b.pos.z);
@@ -205,11 +254,21 @@ export class DriverAI {
     const behind = Math.abs(ang) > 2.2;
     if (behind && dist < 22 && mode !== 'fight') { thr = -0.8; steer = clamp(ang * 2, -1, 1); }
     else {
-      if (Math.abs(ang) > 0.9) thr = Math.min(thr, 0.55);
       const spd = b.forwardSpeed();
-      const target = wantSpeed * car.stats.topSpeed;
-      if (spd > target + 2) thr = spd > target + 8 ? -0.5 : 0;
-      if (dist < 10 && mode !== 'fight') thr = Math.min(thr, 0.3);
+      if (hold !== undefined) {
+        // feed-forward + proportional, low-passed: no pumping between brake and throttle in formation
+        let h = hold / Math.max(10, car.stats.topSpeed) + (hold - spd) * 0.08;
+        h = spd > hold + 4 && this.overrun ? clamp((hold - spd) * 0.06, -0.6, 0) : clamp(h, 0, 1); // brake only when overrunning the slot
+        this.thrS += (h - this.thrS) * Math.min(1, dt * 4);
+        thr = this.thrS;
+      } else {
+        const target = wantSpeed * car.stats.topSpeed;
+        if (spd > target + 2) thr = spd > target + 8 ? -0.5 : 0;
+        if (dist < 10 && mode !== 'fight') thr = Math.min(thr, 0.3);
+        this.thrS = thr;
+      }
+      if (Math.abs(ang) > 0.9) thr = Math.min(thr, 0.55);
+      if (this.boostWish && car.stats.flags.nitro && car.nitro > 0.15 && Math.abs(ang) < 0.3) ctl.boost = 1;
     }
     ctl.throttle = thr;
     ctl.steer = steer;

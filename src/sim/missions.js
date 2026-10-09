@@ -117,7 +117,8 @@ P.missionTick = function () {
       }
       case 'escortSquad': {
         const sq = s.squads[o.squadId];
-        if (!sq || !sq.members.length) { if (o.arrived) this.completeMission(m); else this.failMission(m, 'convoy destroyed'); break; }
+        if (o.arrived) { this.completeMission(m); break; } // set when the caravan sells at the Hub
+        if (!sq || !sq.members.length) { this.failMission(m, 'convoy destroyed'); break; }
         o.x = sq.x; o.z = sq.z;
         break;
       }
@@ -194,15 +195,17 @@ P.genBoardMission = function (giver) {
       return this.createMission({ board: true, giver, type: 'stunt', title: 'Show-Off', desc: `Land ${n} big jumps (1.5s+ airtime) for the cantina crowd.`, obj: { kind: 'stunt', count: n, minAir: 1.5 }, reward: { caps: Math.round(35 * scale) } });
     }
     case 'bounty': {
-      // spawn a named ace with a small crew in a wild or hostile zone
+      // spawn a named ace with a small crew in a wild or hostile zone (bounty gangs count as roaming scavvers)
+      if (this.scavRoamers() >= this.scavRoamCap()) return null;
       const zones = this.world.zones.filter((z) => z.biome !== 'hub' && (s.zones[z.id].claimable || (f && s.zones[z.id].owner && this.hostileTeams(f.id, s.zones[z.id].owner))));
       const zd = rng.pick(zones.length ? zones : this.world.zones.filter((z) => z.biome !== 'hub'));
       const ace = this.createNpc('scavvers', 'lieutenant', { design: { ...PRESET_DESIGNS[rng.pick(['raider', 'spikyHeavy', 'spiky'])], paint: '#3d3a40', paint2: '#e63946' }, skill: Math.min(0.85, 0.4 + day * 0.02), name: genDriverName(rng) });
       ace.epithet = rng.pick(['the Butcher of the Dunes', 'Mad Muffler', 'the Rust Ghost', 'Old Sixguns', 'the Dune Shark']);
       const crew = [ace.id];
       for (let i = 0; i < Math.min(4, 1 + Math.floor(day / 4)); i++) crew.push(this.createNpc('scavvers', 'driver', { design: { ...PRESET_DESIGNS.scav }, skill: 0.35 }).id);
-      const sq = this.createSquad('scavvers', crew, { type: 'roam', zoneId: zd.id, legs: 40 }, { x: zd.cx, z: zd.cz, speed: 9 });
-      return this.createMission({ board: true, giver, type: 'bounty', title: `Bounty: ${ace.name}`, desc: `${ace.name}, "${ace.epithet}", has been hitting caravans in ${zd.name}. Bring back their hubcap.`, obj: { kind: 'killNpc', npcId: ace.id, x: zd.cx, z: zd.cz }, reward: { caps: Math.round(90 * scale), rep: repR(8) }, squadId: sq.id });
+      const p = this.scavSpot(zd.id);
+      const sq = this.createSquad('scavvers', crew, { type: 'roam', zoneId: zd.id, legs: 40 }, { x: p.x, z: p.z, from: p.camp, speed: 9 });
+      return this.createMission({ board: true, giver, type: 'bounty', title: `Bounty: ${ace.name}`, desc: `${ace.name}, "${ace.epithet}", has been hitting caravans in ${zd.name}. Bring back their hubcap.`, obj: { kind: 'killNpc', npcId: ace.id, x: sq.x, z: sq.z }, reward: { caps: Math.round(90 * scale), rep: repR(8) }, squadId: sq.id });
     }
     case 'clearCamp': {
       const camps = Object.values(s.bases).filter((b) => b.scav);

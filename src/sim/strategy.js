@@ -85,9 +85,10 @@ P.factionThink = function (f) {
   }
 
   // 3. War planning
-  const activeOps = Object.values(s.squads).filter((q) => q.factionId === f.id && ['attack', 'claim', 'raidBase'].includes(q.task.type)).length;
+  const ops = Object.values(s.squads).filter((q) => ['attack', 'claim', 'raidBase'].includes(q.task.type));
+  const activeOps = ops.filter((q) => q.factionId === f.id).length;
   const opsCap = 1 + (T.ambition + T.aggression > 1.4 ? 1 : 0);
-  if (activeOps < opsCap) {
+  if (activeOps < opsCap && ops.length < MAX_OPS) {
     const choice = this.chooseOperation(f, myPower, stock);
     if (choice) this.launchOperation(f, choice);
   }
@@ -229,27 +230,40 @@ P.aiRecruit = function (f, bases) {
   }
 };
 
+// World-wide limits keep the roads readable: a few purposeful convoys rather than a stream of lone trucks
+const MAX_TRADE = 3, MAX_CONVOY = 3, MAX_OPS = 4;
+
 P.aiCaravans = function (f, bases, stock) {
   const s = this.s;
-  const active = Object.values(s.squads).filter((q) => q.factionId === f.id && (q.task.type === 'trade' || q.task.type === 'convoy'));
-  // supply convoy from outlying base to capital
+  const all = Object.values(s.squads);
   const cap = this.capital(f.id);
-  if (cap && active.filter((q) => q.task.type === 'convoy').length < 1) {
+  if (!cap) return;
+  // stagger each faction's first runs so the roads don't fill up all at once on day one
+  f.nextConvoy ??= s.time + DAY_LEN * this.rng.range(0.1, 0.8);
+  f.nextTrade ??= s.time + DAY_LEN * this.rng.range(0.1, 1.2);
+  // crew: the truck plus at least one escort, unless the faction is too small to spare anyone
+  const crewFrom = (b, n) => {
+    const crew = this.availableFighters(f, b).slice(0, n);
+    return crew.length >= 2 || (crew.length && this.members(f.id).length < 4) ? crew : null;
+  };
+  // supply convoy from an outlying base with a real stockpile to the capital
+  if (s.time >= f.nextConvoy && all.filter((q) => q.task.type === 'convoy').length < MAX_CONVOY) {
     for (const b of bases) {
       if (b === cap) continue;
       const total = Object.values(b.storage).reduce((t, v) => t + v, 0);
-      if (total < 80) continue;
-      const crew = this.availableFighters(f, b).slice(0, 2);
-      if (!crew.length) continue;
+      if (total < 120) continue;
+      const crew = crewFrom(b, 2 + (f.traits.caution > 0.6 ? 1 : 0));
+      if (!crew) continue;
       const cargo = {};
       for (const [r, v] of Object.entries(b.storage)) { const take = Math.floor(v * 0.6); if (take > 0) { cargo[r] = take; b.storage[r] -= take; } }
       crew[0].design = { ...this.styleDesign(f, false), ...PRESET_CONVOY(f) };
       this.createSquad(f.id, crew.map((n) => n.id), { type: 'convoy', destBaseId: cap.id }, { from: b, cargo, speed: 9, name: `${f.short} supply convoy` });
+      f.nextConvoy = s.time + DAY_LEN * this.rng.range(0.8, 1.1);
       break;
     }
   }
   // trade caravan to the Hub: sell the most valuable surplus
-  if (active.filter((q) => q.task.type === 'trade').length < 1 && cap) {
+  if (s.time >= f.nextTrade && all.filter((q) => q.task.type === 'trade').length < MAX_TRADE) {
     const mem = this.members(f.id).length;
     const keep = { food: mem * 2, water: mem * 2, fuel: 60, ammo: 80, scrap: 120 };
     const cargo = {};
@@ -260,11 +274,13 @@ P.aiCaravans = function (f, bases, stock) {
       if (surplus > 25) { const take = Math.min(surplus, 120); cargo[r] = take; value += take * unitPrice(s.market, r); }
     }
     if (value > 150) {
-      const crew = this.availableFighters(f, cap).slice(0, 2 + (f.traits.caution > 0.6 ? 1 : 0));
-      if (crew.length) {
+      const crew = crewFrom(cap, 2 + (f.traits.caution > 0.6 ? 1 : 0));
+      if (crew) {
         for (const [r, v] of Object.entries(cargo)) { let left = v; for (const b of bases) { left -= this.takeStorage(b, r, left); if (left <= 0) break; } cargo[r] = v - Math.max(0, left); }
         crew[0].design = { ...this.styleDesign(f, false), ...PRESET_CONVOY(f) };
         this.createSquad(f.id, crew.map((n) => n.id), { type: 'trade' }, { from: cap, cargo, speed: 9, name: `${f.short} trade caravan` });
+        // greedy factions run caravans a little more often
+        f.nextTrade = s.time + DAY_LEN * (1.2 + (1 - (f.traits.greed ?? 0.5)) * 0.4);
       }
     }
   }

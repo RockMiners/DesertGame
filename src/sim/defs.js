@@ -4,8 +4,11 @@ export const DAY_LEN = 720; // real seconds per in-game day
 export const HOUR = DAY_LEN / 24;
 export const TILE = 6; // metres per base tile
 export const BASE_SIZES = [0, 7, 9, 11]; // tiles per side by base level
-export const PHYS_R = 520; // squads/bases within this of a player become physical
-export const PHYS_R_OUT = 640;
+export const PHYS_R = 420; // squads/bases within this of a player become physical
+export const PHYS_R_OUT = 560;
+export const GUARD_R = 260; // garrison guard cars only roll out when a player is this close
+export const GUARD_R_OUT = 340;
+export const HUB_QUIET_R = 650; // scavvers never spawn or roam inside this ring around the Hub
 
 // produces: { res: per game hour at full efficiency }; workers: members needed; power: +gen / -use
 export const STRUCTS = {

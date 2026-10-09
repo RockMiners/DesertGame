@@ -192,7 +192,6 @@ export class Combat {
   }
 
   spawn(p) {
-    if (!p.visual && this.game.net && (this.game.net.isHost || p.owner?.isPlayer)) this.game.net.shot(p);
     p.age = 0;
     p.px = p.x; p.py = p.y; p.pz = p.z;
     this.list.push(p);

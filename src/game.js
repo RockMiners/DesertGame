@@ -7,6 +7,7 @@ import { Sky } from './render/sky.js';
 import { FX } from './render/fx.js';
 import { Tracks } from './render/tracks.js';
 import { ChaseCamera } from './render/camera.js';
+import { AdaptiveQuality } from './render/perf.js';
 import { WheelPool, CarView } from './render/carView.js';
 import { Car } from './vehicle/car.js';
 import { collideBodies, collideStatic } from './vehicle/physics.js';
@@ -20,6 +21,8 @@ import { PROP_INFO } from './world/worldgen.js';
 
 const FIXED = 1 / 60;
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _ray = new THREE.Vector3(), _aimDir = new THREE.Vector3(), _hit = {};
+const _q = new THREE.Quaternion(), _dark = new THREE.Color(), _mods = { powerFactor: 1 }, _deadMods = { powerFactor: 0 }, _anchors = [];
+const LOD_R2 = 160 * 160; // beyond this from any player car, AI physics runs 1 substep instead of 2
 import { HUB_SAFE_R } from './sim/constants.js';
 export { HUB_SAFE_R };
 const DESTRUCTIBLE = new Set(['cactus', 'barrel', 'sign', 'lamp', 'deadtree', 'mushroom', 'billboard', 'skull', 'pipe', 'wreck', 'palm']);
@@ -37,6 +40,8 @@ export class Game {
     this.friendlyFire = false;
     this.listeners = {};
     this.quality = opts.quality ?? 1;
+    this._env = { daylight: 1, time: 0, fuelMult: 1, onRefuel: null };
+    this._onRefuel = (n) => this.ui?.toast(`Refuelled ${Math.round(n)} L from cargo`, 'info');
   }
 
   on(ev, fn) { (this.listeners[ev] ||= []).push(fn); }
@@ -79,6 +84,8 @@ export class Game {
     progress('Warming engines...', 0.85);
     await tick();
     this.viewDist = 900;
+    // base pixel ratio / fx quality are what was set above (respects opts.quality)
+    this.perf = new AdaptiveQuality(this.renderer, { fx: this.fx, enabled: this.opts.adaptive !== false });
   }
 
   resize() {
@@ -159,6 +166,8 @@ export class Game {
     if (!target.alive || amount <= 0) return;
     if (target.spawnProtect > 0) return;
     if (this.inSafeZone(target.body.pos.x, target.body.pos.z)) return;
+    // co-op: damage is decided on the machine that owns the shooter; a replica's shots are only for show
+    if (source?.isRemote && !opts.fromNet) return;
     if (target.isRemote && this.net) { this.net.sendDamage(target, amount, source, opts); return; }
     let amt = amount;
     if (this.director) amt *= this.director.damageMult(target, source);
@@ -277,25 +286,33 @@ export class Game {
   physicsStep(dt) {
     const T = this.terrain;
     const daylight = this.sky ? clamp(this.sky.sunDir.y * 2, 0, 1) : 1;
+    const env = this._env;
+    env.daylight = daylight; env.time = this.time;
+    // physics LOD anchors: the local player and co-op partners
+    const pc = this.player?.car;
+    _anchors.length = 0;
+    if (pc) for (const c of this.cars) if (c === pc || c.isRemotePlayer) _anchors.push(c.body.pos);
     for (const car of this.cars) {
       car.prevPos.copy(car.body.pos);
       car.prevQuat.copy(car.body.quat);
       if (car.isRemote) continue;
+      const sub = lodSubsteps(car, pc);
       if (!car.alive) {
         car.body.controls.throttle = 0; car.body.controls.steer = 0; car.body.controls.boost = 0;
-        car.body.step(dt, T, { powerFactor: 0 });
+        car.body.step(dt, T, _deadMods, sub);
         continue;
       }
       car.ai?.update(dt);
-      car.updateStatus(dt, { daylight, time: this.time, fuelMult: car.isPlayer ? 1 : 0.5, onRefuel: car.isPlayer ? (n) => this.ui?.toast(`Refuelled ${Math.round(n)} L from cargo`, 'info') : null });
+      env.fuelMult = car.isPlayer ? 1 : 0.5; env.onRefuel = car.isPlayer ? this._onRefuel : null;
+      car.updateStatus(dt, env);
       // weapons
       for (const w of car.weapons) {
         const trig = w.kind === 'rear' ? car.triggers[1] : car.triggers[0];
         if (trig) this.combat.tryFire(car, w, dt);
       }
-      const mods = { powerFactor: car.powerFactor ?? 1 };
+      _mods.powerFactor = car.powerFactor ?? 1;
       if (car.slick > 0) car.body.controls.handbrake = 1;
-      car.body.step(dt, T, mods);
+      car.body.step(dt, T, _mods, sub);
       // burning & liquids
       if (car.burn > 0) {
         car.burn -= dt;
@@ -366,7 +383,8 @@ export class Game {
   }
 
   // ---------- Frame ----------
-  frame(dtReal) {
+  // render=false steps the world without drawing (a co-op host whose tab is in the background)
+  frame(dtReal, render = true) {
     const dt = Math.min(0.1, dtReal);
     if (!this.paused) {
       this.acc += dt;
@@ -383,13 +401,14 @@ export class Game {
       this.pickups.update(dt, this.cars, this.focusPos());
       this.postUpdate?.(dt);
     }
-    this.renderFrame(dt);
+    if (!render) { this.input.endFrame(); return; }
+    this.renderFrame(dt, dtReal);
     this.input.endFrame();
   }
 
   focusPos() { return this.player?.car ? this.player.car.body.pos : this.camera.position; }
 
-  renderFrame(dt) {
+  renderFrame(dt, dtReal = dt) {
     const alpha = clamp(this.acc / FIXED, 0, 1);
     const focus = this.focusPos();
     const night = this.sky.nightness;
@@ -400,8 +419,8 @@ export class Game {
       car.view.setVisible(vis);
       if (!vis) continue;
       _v.lerpVectors(car.prevPos, car.body.pos, alpha);
-      const q = car.prevQuat.clone().slerp(car.body.quat, alpha);
-      car.view.update(dt, this.wheels, night, _v, q);
+      _q.copy(car.prevQuat).slerp(car.body.quat, alpha);
+      car.view.update(dt, this.wheels, night, _v, _q);
       if (!this.paused) this.carFx(car, dt, d);
     }
     this.wheels.end();
@@ -412,6 +431,7 @@ export class Game {
     }
     this.propsR.update(this.camera.position, this.viewDist);
     this.structures?.render(dt, this.camera.position);
+    this.perf?.update(dtReal);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -421,8 +441,7 @@ export class Game {
     const biome = this.terrain.biomeAt(b.pos.x, b.pos.z);
     const near = dist < 160;
     if (car.alive && near) {
-      const col = new THREE.Color(biome.dust);
-      const dark = col.clone().multiplyScalar(0.72);
+      const dark = _dark.set(biome.dust).multiplyScalar(0.72); // Tracks.add copies the components
       for (let i = 0; i < b.wheels.length; i++) {
         const w = b.wheels[i];
         if (!w.contact) continue;
@@ -457,6 +476,13 @@ export class Game {
       if (e.type === 'scrape' && near) this.fx.sparkBurst(e.x, e.y, e.z, 3, 0xffd27a, 5);
     }
   }
+}
+
+function lodSubsteps(car, pc) {
+  if (!pc || car === pc) return 2;
+  const p = car.body.pos;
+  for (let i = 0; i < _anchors.length; i++) if (p.distanceToSquared(_anchors[i]) < LOD_R2) return 2;
+  return 1;
 }
 
 function tick() { return new Promise((r) => setTimeout(r, 0)); }

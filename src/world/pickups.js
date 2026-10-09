@@ -3,10 +3,14 @@ import * as THREE from 'three';
 import { propGeometry, vcMat } from '../render/models.js';
 import { outlineGeometry, outlineMat } from '../render/toon.js';
 import { RES_INFO } from './biomes.js';
+import { markRange } from '../render/perf.js';
 
 const TYPES = ['scrapPile', 'oilBarrels', 'ammoCrate', 'waterTank', 'foodCrate', 'chemDrum', 'circuitBox', 'crystalNode', 'lootCrate'];
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
+const CELL = 96; // spatial grid cell (m); node positions never change
+const cellKey = (ix, iz) => (ix + 512) * 1024 + (iz + 512);
+const _near = [], _reach = [];
 
 export class Pickups {
   constructor(game, spawns) {
@@ -25,6 +29,41 @@ export class Pickups {
       this.meshes[t] = { m, ol };
     }
     this.time = 0;
+    this.counts = {};
+    this.grid = new Map();
+    this.gridN = -1; this.gridOf = null;
+  }
+
+  // grid is rebuilt whenever nodes is replaced or grows (bonus nodes get pushed straight into this.nodes)
+  syncGrid() {
+    if (this.gridOf === this.nodes && this.gridN === this.nodes.length) return;
+    this.grid.clear();
+    for (const n of this.nodes) this.insert(n);
+    this.gridOf = this.nodes; this.gridN = this.nodes.length;
+  }
+  insert(n) {
+    const k = cellKey(Math.floor(n.x / CELL), Math.floor(n.z / CELL));
+    let c = this.grid.get(k);
+    if (!c) this.grid.set(k, (c = []));
+    c.push(n);
+  }
+  addNode(n) {
+    this.syncGrid();
+    this.nodes.push(n); this.insert(n); this.gridN = this.nodes.length;
+    return n;
+  }
+
+  // nodes (active or not) in grid cells overlapping the square of half-size r around x,z; callers do the exact test
+  nodesInBox(x, z, r, out = []) {
+    this.syncGrid();
+    out.length = 0;
+    const x0 = Math.floor((x - r) / CELL), x1 = Math.floor((x + r) / CELL);
+    const z0 = Math.floor((z - r) / CELL), z1 = Math.floor((z + r) / CELL);
+    for (let ix = x0; ix <= x1; ix++) for (let iz = z0; iz <= z1; iz++) {
+      const c = this.grid.get(cellKey(ix, iz));
+      if (c) for (let i = 0; i < c.length; i++) out.push(c[i]);
+    }
+    return out;
   }
 
   // loot drop from wrecks: {res: amount}
@@ -53,7 +92,7 @@ export class Pickups {
       if (!car.alive || (!car.isPlayer && !car.collects)) continue;
       const reach = (car.body.radius + 2.2) * (car.stats.flags.magnet ? 3 : 1);
       const px = car.body.pos.x, pz = car.body.pos.z;
-      for (const n of this.nodes) {
+      for (const n of this.nodesInBox(px, pz, reach, _reach)) {
         if (!n.active) continue;
         const dx = n.x - px, dz = n.z - pz;
         if (dx * dx + dz * dz > reach * reach) continue;
@@ -81,7 +120,7 @@ export class Pickups {
     }
     this.drops = this.drops.filter((d) => !d.taken && (d.life -= dt) > 0);
     // render
-    const counts = {};
+    const counts = this.counts;
     for (const t of TYPES) counts[t] = 0;
     const lim2 = 420 * 420;
     const put = (type, x, y, z, rot, sc) => {
@@ -92,7 +131,7 @@ export class Pickups {
       _m.compose(_v.set(x, y, z), _q, _s.set(sc, sc, sc));
       e.m.setMatrixAt(i, _m); e.ol.setMatrixAt(i, _m);
     };
-    for (const n of this.nodes) {
+    for (const n of this.nodesInBox(viewPos.x, viewPos.z, 420, _near)) {
       if (!n.active) continue;
       const dx = n.x - viewPos.x, dz = n.z - viewPos.z;
       if (dx * dx + dz * dz > lim2) continue;
@@ -105,13 +144,13 @@ export class Pickups {
     }
     for (const t of TYPES) {
       const e = this.meshes[t];
-      e.m.count = e.ol.count = Math.min(400, counts[t]);
-      e.m.instanceMatrix.needsUpdate = true; e.ol.instanceMatrix.needsUpdate = true;
+      const n = e.m.count = e.ol.count = Math.min(400, counts[t]);
+      markRange(e.m.instanceMatrix, 0, n * 16); markRange(e.ol.instanceMatrix, 0, n * 16);
     }
   }
 
   // for minimap/radar
-  nearbyNodes(x, z, r) { return this.nodes.filter((n) => n.active && Math.hypot(n.x - x, n.z - z) < r); }
+  nearbyNodes(x, z, r) { return this.nodesInBox(x, z, r).filter((n) => n.active && Math.hypot(n.x - x, n.z - z) < r); }
 }
 
 export function lootText(got) {

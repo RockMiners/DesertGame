@@ -2,7 +2,8 @@
 // Pure logic (no DOM / three.js) so it runs headless in tests and on the multiplayer host.
 import { RNG, clamp, hashStr } from '../core/math.js';
 import { RESOURCES } from '../world/biomes.js';
-import { TILE, BASE_SIZES, STRUCTS, DAY_LEN, HOUR, dayOf, timeOfDay } from './defs.js';
+import { TILE, BASE_SIZES, STRUCTS, DAY_LEN, HOUR, HUB_QUIET_R, dayOf, timeOfDay } from './defs.js';
+import { HUB_SAFE_R } from './constants.js';
 import { FACTION_DEFS, INITIAL_RELATIONS, INITIAL_ALLIANCES, INITIAL_WARS, HISTORY, START_YEAR, BANDITS, genDriverName, genBaseName, archetypeOf } from './lore.js';
 import { initMarket, marketHour, recordPrices, marketSell, marketBuy, unitPrice, buyPrice } from './economy.js';
 import { designStats, PRESET_DESIGNS, DEFAULT_DESIGN, CHASSIS } from '../vehicle/parts.js';
@@ -605,7 +606,8 @@ export class Sim {
       if (sq.physical) continue; // the game drives physical squads
       const dx = sq.tx - sq.x, dz = sq.tz - sq.z;
       const d = Math.hypot(dx, dz);
-      const arriveR = sq.task.type === 'attack' || sq.task.type === 'raidBase' ? 70 : 25;
+      // caravans stop at the Hub walls rather than parking in the middle of town
+      const arriveR = sq.task.type === 'attack' || sq.task.type === 'raidBase' ? 70 : sq.task.type === 'trade' && !sq.retreating ? HUB_SAFE_R + 15 : 25;
       if (d > arriveR) {
         const step = Math.min(d, sq.speed * dt * (sq.state === 'returning' ? 1.1 : 1));
         sq.x += (dx / d) * step; sq.z += (dz / d) * step;
@@ -656,6 +658,8 @@ export class Sim {
         for (const [r, v] of Object.entries(sq.cargo)) caps += marketSell(s.market, r, v);
         sq.cargo = {};
         if (f) f.treasury += caps;
+        const m = s.missions[sq.missionId];
+        if (m?.obj.kind === 'escortSquad') m.obj.arrived = true;
         this.emit('caravanSold', sq, caps);
         this.squadReturn(sq);
         break;
@@ -669,7 +673,12 @@ export class Sim {
         }
         if (sq.legs >= (t.legs || 4)) { this.squadReturn(sq); return; }
         const zd = this.zoneDef(t.zoneId);
-        if (zd) { const a = this.rng.range(0, Math.PI * 2), r = this.rng.range(40, 260); sq.tx = zd.cx + Math.cos(a) * r; sq.tz = zd.cz + Math.sin(a) * r; }
+        if (zd) {
+          // next leg stays inside the zone; patrols with a post circle it, scavvers keep clear of the Hub
+          const post = t.type === 'patrol' && t.x !== undefined;
+          const p = this.zonePoint(zd.id, post ? t.x : zd.cx, post ? t.z : zd.cz, post ? 30 : 40, post ? 150 : 260, sq.factionId === 'scavvers' ? HUB_QUIET_R : 0, sq);
+          sq.tx = p.x; sq.tz = p.z;
+        }
         break;
       }
       case 'escort': break;
@@ -994,7 +1003,8 @@ export class Sim {
 
   spawnScavCamp(zoneId) {
     this.ensureScavFaction();
-    const sites = this.world.sites.filter((x) => x.zoneId === zoneId);
+    // camps take the free site farthest from the Hub so the roads near town stay quiet
+    const sites = this.world.sites.filter((x) => x.zoneId === zoneId).sort((a, b) => Math.hypot(b.x, b.z) - Math.hypot(a.x, a.z));
     const used = new Set(Object.values(this.s.bases).map((b) => `${b.x},${b.z}`));
     const site = sites.find((x) => !used.has(`${Math.round(x.x)},${Math.round(x.z)}`));
     if (!site) return null;
@@ -1003,17 +1013,46 @@ export class Sim {
     return b;
   }
 
+  scavRoamers() { return Object.values(this.s.squads).filter((q) => q.factionId === 'scavvers' && q.task.type === 'roam').length; }
+  scavRoamCap() { return Math.min(4, 2 + Math.floor(this.day / 8)); }
+
+  // Where a scavver gang shows up: around one of the zone's camps (else its centre), never near the Hub
+  scavSpot(zoneId) {
+    const zd = this.zoneDef(zoneId);
+    const camps = Object.values(this.s.bases).filter((b) => b.scav && b.zoneId === zoneId);
+    const camp = camps.length ? this.rng.pick(camps) : null;
+    const p = camp ? this.zonePoint(zoneId, camp.x, camp.z, 40, 140, HUB_QUIET_R) : this.zonePoint(zoneId, zd.cx, zd.cz, 0, 220, HUB_QUIET_R);
+    return { ...p, camp };
+  }
+
+  // Random point near (cx, cz) inside the zone, at least minHub from the Hub centre (and, given a squad,
+  // reachable from where it is without cutting through that ring)
+  zonePoint(zoneId, cx, cz, rMin, rMax, minHub = 0, from = null) {
+    const T = this.world.terrain;
+    for (let i = 0; i < 16; i++) {
+      const a = this.rng.range(0, Math.PI * 2), r = this.rng.range(rMin, rMax);
+      const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+      if (!T.inBounds(x, z) || (zoneId && T.zoneAt(x, z).id !== zoneId)) continue;
+      if (minHub && (Math.hypot(x, z) < minHub || (from && segDist0(from.x, from.z, x, z) < minHub * 0.9))) continue;
+      return { x, z };
+    }
+    const d = Math.hypot(cx, cz);
+    if (minHub && d < minHub) { const k = (minHub + 40) / Math.max(1, d); return { x: cx * k, z: cz * k }; }
+    return { x: cx, z: cz };
+  }
+
   respawnScavs() {
     const s = this.s;
-    const scavSquads = Object.values(s.squads).filter((q) => q.factionId === 'scavvers').length;
     const wild = this.world.zones.filter((z) => z.biome !== 'hub' && s.zones[z.id].claimable);
-    if (scavSquads < 3 + Math.floor(this.day / 6) && wild.length) {
-      const zd = this.rng.pick(wild);
+    if (this.scavRoamers() < this.scavRoamCap() && wild.length) {
+      // gangs ride out of an existing camp when there is one
+      const camped = wild.filter((z) => Object.values(s.bases).some((b) => b.scav && b.zoneId === z.id));
+      const zd = this.rng.pick(camped.length ? camped : wild);
       const ids = [];
-      const n = this.rng.int(2, 3 + Math.min(3, Math.floor(this.day / 5)));
+      const n = this.rng.int(2, 3 + Math.min(2, Math.floor(this.day / 5)));
       for (let i = 0; i < n; i++) ids.push(this.createNpc('scavvers', 'driver', { design: this.rng.chance(0.2) ? { ...PRESET_DESIGNS.raider } : { ...PRESET_DESIGNS.scav }, skill: this.rng.range(0.15, 0.45) }).id);
-      const a = this.rng.range(0, Math.PI * 2);
-      this.createSquad('scavvers', ids, { type: 'roam', zoneId: zd.id, legs: 8 }, { x: zd.cx + Math.cos(a) * 150, z: zd.cz + Math.sin(a) * 150, speed: 11 });
+      const p = this.scavSpot(zd.id);
+      this.createSquad('scavvers', ids, { type: 'roam', zoneId: zd.id, legs: 8 }, { x: p.x, z: p.z, from: p.camp, speed: 11 });
     }
     // camps regrow in empty wild zones every few days
     if (this.day % 3 === 0) for (const zd of wild) {
@@ -1045,6 +1084,13 @@ export class Sim {
     this.s = state;
     this.rng = new RNG((state.seed * 7919 + Math.floor(state.time)) >>> 0);
   }
+}
+
+// distance from the origin (the Hub) to the segment a-b
+function segDist0(ax, az, bx, bz) {
+  const dx = bx - ax, dz = bz - az;
+  const t = clamp(-(ax * dx + az * dz) / (dx * dx + dz * dz || 1), 0, 1);
+  return Math.hypot(ax + dx * t, az + dz * t);
 }
 
 export { STRUCTS, TILE, DAY_LEN, HOUR, unitPrice, buyPrice, marketSell, marketBuy };

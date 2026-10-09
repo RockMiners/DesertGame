@@ -108,7 +108,10 @@ export class Structures {
       const b = bases[id];
       if (!b) { this.removeView(id, true); continue; }
       if (view.hash !== this.hashBase(b)) this.rebuild(b, view);
-      else for (const t of view.turrets) { const st = b.structs.find((x) => x.id === t.stId); if (st) t.st = st; }
+      else {
+        view.base = b; // co-op clients get fresh base objects with every state update
+        for (const t of view.turrets) { const st = b.structs.find((x) => x.id === t.stId); if (st) t.st = st; }
+      }
     }
     for (const b of Object.values(bases)) if (!this.views.has(b.id)) this.rebuild(b, null);
   }
@@ -223,6 +226,7 @@ export class Structures {
 
   damage(c, amt, source) {
     if (!c || c.kind !== 'struct') return;
+    if (source?.isRemote) return; // a co-op replica's shots are decided on its owner's machine
     const b = this.sim.s.bases[c.baseId];
     if (!b) return;
     const st = b.structs.find((s) => s.id === c.stId);
@@ -299,6 +303,7 @@ export class Structures {
     const g = this.game, b = view.base;
     if (!this.sim.s.bases[b.id]) return;
     const team = b.factionId;
+    const dmgMult = this.sim.isReplica ? 0 : 0.8; // co-op clients: turrets are for show, the host deals their damage
     for (const t of view.turrets) {
       if (!t.st || t.st.hp <= 0) continue;
       const def = STRUCTS[t.st.type];
@@ -335,7 +340,7 @@ export class Structures {
       if (w.beam) {
         const end = tgt.body.pos.clone(); end.y += 1;
         g.fx.beam(muzzle, end, 0xd08bff, 0.3);
-        g.applyDamage(tgt, w.dmg * 0.6 * dt * fair, null, { kind: 'energy', quiet: true });
+        if (dmgMult) g.applyDamage(tgt, w.dmg * 0.6 * dt * fair, null, { kind: 'energy', quiet: true });
         continue;
       }
       if (t.cd > 0) continue;
@@ -346,8 +351,8 @@ export class Structures {
       const spread = (w.spread + 0.02) * (2 - fair);
       dir.x += (Math.random() - 0.5) * spread * 2; dir.y += (Math.random() - 0.5) * spread; dir.z += (Math.random() - 0.5) * spread * 2;
       dir.normalize();
-      if (w.proj === 'shell') g.combat.spawn({ kind: 'shell', owner: null, team, x: muzzle.x, y: muzzle.y, z: muzzle.z, vx: dir.x * w.speed, vy: dir.y * w.speed + 3, vz: dir.z * w.speed, dmg: w.dmg * 0.8, splash: w.splash, knock: w.knock, life: 5, grav: -9.8 * w.gravity * 2.2, dmgKind: 'explosive' });
-      else g.combat.spawn({ kind: 'bullet', owner: null, team, x: muzzle.x, y: muzzle.y, z: muzzle.z, vx: dir.x * w.speed, vy: dir.y * w.speed, vz: dir.z * w.speed, dmg: w.dmg * 0.8, life: t.range / w.speed + 0.2, dmgKind: 'bullet' });
+      if (w.proj === 'shell') g.combat.spawn({ kind: 'shell', owner: null, team, x: muzzle.x, y: muzzle.y, z: muzzle.z, vx: dir.x * w.speed, vy: dir.y * w.speed + 3, vz: dir.z * w.speed, dmg: w.dmg * dmgMult, splash: w.splash, knock: w.knock, life: 5, grav: -9.8 * w.gravity * 2.2, dmgKind: 'explosive' });
+      else g.combat.spawn({ kind: 'bullet', owner: null, team, x: muzzle.x, y: muzzle.y, z: muzzle.z, vx: dir.x * w.speed, vy: dir.y * w.speed, vz: dir.z * w.speed, dmg: w.dmg * dmgMult, life: t.range / w.speed + 0.2, dmgKind: 'bullet' });
       g.fx.muzzle(muzzle.x, muzzle.y, muzzle.z, dir, 0xffe08a, w.proj === 'shell' ? 1.6 : 0.7);
       g.audio?.play(w.sound, muzzle);
     }

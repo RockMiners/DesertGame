@@ -1,10 +1,20 @@
-// Player-hosted co-op. The host's browser runs the world; friends connect peer-to-peer (WebRTC via PeerJS)
-// and join the host's group. A BroadcastChannel transport (?net=local) allows same-machine testing.
+// Player-hosted co-op. The host's browser runs the whole world; friends get compact snapshots of the cars
+// near them (interpolated ~100-180 ms in the past so motion is smooth), the slow world state in sections that
+// are re-sent only when they change, and they send back their own car, the damage they deal and their commands.
 import * as THREE from 'three';
+import { packCar, unpackCar, packFast, unpackFast, packSquads, carMeta, SECTIONS, buildSection, applySection, pushSample, sampleAt, FLAG } from './protocol.js';
+import { PeerTransport, LocalTransport, RoomTransport, artifactCaps } from './transports.js';
+import { DEFAULT_DESIGN } from '../vehicle/parts.js';
+import { dayOf } from '../sim/defs.js';
 
-const PREFIX = 'dustbowl-dyn-';
-const CAR_RATE = 1 / 20;
-const STATE_RATE = 2;
+const VIEW_R = 650;                      // cars farther than this from every friend are not sent
+const FAST_HZ = { peer: 20, local: 20, room: 12 };
+const SECTION_EVERY = { peer: 2, local: 2, room: 4 };
+const MAX_DMG = 2000;
+
+// artifact builds use the claude.ai room; ?net=local (same-browser tabs) and ?net=room (with a stand-in) are for testing
+const NET_PARAM = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('net') : null;
+export const NET_KIND = import.meta.env?.MODE === 'artifact' ? 'room' : NET_PARAM === 'local' || NET_PARAM === 'room' ? NET_PARAM : 'peer';
 
 function randomCode() {
   const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -12,131 +22,106 @@ function randomCode() {
   for (let i = 0; i < 5; i++) s += a[Math.floor(Math.random() * a.length)];
   return s;
 }
+const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d);
 
-// ----- transports -----
-class LocalTransport {
-  constructor(code, id) {
-    this.ch = new BroadcastChannel(PREFIX + code);
-    this.id = id;
-    this.handlers = {};
-    this.ch.onmessage = (e) => {
-      const m = e.data;
-      if (m.to && m.to !== this.id) return;
-      if (m.from === this.id) return;
-      if (m.sys === 'hello') this.handlers.connect?.(m.from, m.name);
-      else if (m.sys === 'bye') this.handlers.disconnect?.(m.from);
-      else this.handlers.data?.(m.from, m.data);
-    };
+// Replays a sender's timeline a little in the past. The playback clock runs at real speed and is only
+// steered (a few percent faster or slower) toward the estimate, so packet jitter never jerks the motion.
+export class Clock {
+  constructor() { this.off = null; this.iv = 60; this.last = 0; this.rt = null; this.at = 0; }
+  see(t) {
+    const now = performance.now();
+    const o = t - now;
+    if (this.off === null || Math.abs(o - this.off) > 1500) this.off = o;
+    else this.off += (o - this.off) * 0.05;
+    if (this.last) this.iv += (Math.min(600, now - this.last) - this.iv) * 0.08;
+    this.last = now;
   }
-  on(ev, fn) { this.handlers[ev] = fn; }
-  hello(name) { this.ch.postMessage({ sys: 'hello', from: this.id, name }); }
-  send(to, data) { this.ch.postMessage({ from: this.id, to, data }); }
-  broadcast(data) { this.ch.postMessage({ from: this.id, data }); }
-  close() { this.ch.postMessage({ sys: 'bye', from: this.id }); this.ch.close(); }
-}
-
-class PeerTransport {
-  constructor() { this.handlers = {}; this.conns = new Map(); }
-  on(ev, fn) { this.handlers[ev] = fn; }
-  async open(id) {
-    const { default: Peer } = await import('peerjs');
-    return new Promise((resolve, reject) => {
-      this.peer = id ? new Peer(id) : new Peer();
-      this.peer.on('open', (pid) => { this.id = pid; resolve(pid); });
-      this.peer.on('error', (e) => { this.handlers.error?.(e); reject(e); });
-      this.peer.on('connection', (conn) => this.attach(conn));
-    });
+  delay() { return Math.min(450, this.iv * 1.7 + 40); }
+  now(at = performance.now()) {
+    const target = at + (this.off || 0) - this.delay();
+    if (this.rt === null || Math.abs(target - this.rt) > 400) { this.rt = target; this.at = at; return target; }
+    const el = at - this.at;
+    if (el <= 0) return this.rt;
+    this.at = at;
+    const err = target - (this.rt + el);
+    this.rt += el + Math.max(-el * 0.06, Math.min(el * 0.06, err * 0.04));
+    return this.rt;
   }
-  attach(conn) {
-    conn.on('open', () => { this.conns.set(conn.peer, conn); this.handlers.connect?.(conn.peer, conn.metadata?.name); });
-    conn.on('data', (d) => this.handlers.data?.(conn.peer, d));
-    conn.on('close', () => { this.conns.delete(conn.peer); this.handlers.disconnect?.(conn.peer); });
-  }
-  connect(hostId, name) {
-    const conn = this.peer.connect(hostId, { reliable: true, metadata: { name } });
-    this.attach(conn);
-    return conn;
-  }
-  send(to, data) { const c = this.conns.get(to); if (c?.open) c.send(data); }
-  broadcast(data) { for (const c of this.conns.values()) if (c.open) c.send(data); }
-  close() { this.peer?.destroy(); }
 }
 
 export class Net {
-  constructor(app) {
+  constructor(app, kind = NET_KIND) {
     this.app = app;
+    this.kind = kind;
     this.isHost = false;
     this.isClient = false;
-    this.peers = new Map(); // peerId -> { name, car }
+    this.peers = new Map();     // host: pid -> { name, car, known:Set<nid>, clock, meta, hurt:[] }
     this.pending = new Map();
     this.reqId = 1;
-    this.carT = 0;
-    this.stateT = 0;
-    this.lastKeys = {};
-    this.remoteCars = new Map(); // id -> car (replicas)
-    this.log = [];
+    this.fastT = 0; this.secT = 0; this.flushT = 0; this.metaT = 0; this.sweepT = 0;
+    this.ent = new Map();       // host: car -> { nid, dv, sig }
+    this.byNid = new Map();     // host: nid -> car · client: nid -> replica car
+    this.metas = new Map();     // client: nid -> meta
+    this.seen = new Map();      // client: nid -> last time seen
+    this.nextNid = 1;
+    this.secJson = {};
+    this.secRecv = {};
+    this.hostClock = new Clock();
+    this.evQ = [];
+    this.dmgAcc = new Map();    // client: nid -> [amount, kind]
+    this.sdAcc = new Map();     // client: base|struct -> [b, s, amount, team]
+    this.needMeta = new Set();
   }
 
   get game() { return this.app.game; }
   get sim() { return this.app.sim; }
 
-  // ---------- setup ----------
+  async makeTransport() {
+    if (this.kind === 'room') return new RoomTransport(await artifactCaps());
+    if (this.kind === 'local') return new LocalTransport();
+    return new PeerTransport();
+  }
+
+  inviteLink() {
+    if (this.kind === 'room') return null;
+    const u = new URL(location.href);
+    u.search = '';
+    u.searchParams.set('join', this.code);
+    if (this.kind === 'local') u.searchParams.set('net', 'local');
+    return u.toString();
+  }
+
+  // ======================================================== host
   async host() {
     this.isHost = true;
-    this.code = randomCode();
-    const local = new URLSearchParams(location.search).get('net') === 'local';
-    if (local) {
-      this.t = new LocalTransport(this.code, 'host');
-      this.myId = 'host';
-    } else {
-      this.t = new PeerTransport();
-      this.myId = await this.t.open(PREFIX + this.code);
+    this.t = await this.makeTransport();
+    this.t.onJoin = (pid, name) => this.onPeerJoin(pid, name);
+    this.t.onLeave = (pid) => this.onPeerLeave(pid);
+    this.t.onMsg = (pid, m) => this.onHostMsg(pid, m);
+    this.t.onFast = (pid, s) => this.onHostFast(pid, s);
+    this.t.onLost = (why) => { if (why === 'not_permitted') this.app.ui?.toast('Only the owner or editors of this artifact can host co-op here.', 'bad'); };
+    for (let tries = 0; ; tries++) {
+      this.code = randomCode();
+      try { await this.t.host(this.code, this.info()); break; }
+      catch (e) { if (e?.type !== 'unavailable-id' || tries > 3) throw e; }
     }
-    this.t.on('connect', (pid, name) => this.onPeerJoin(pid, name));
-    this.t.on('disconnect', (pid) => this.onPeerLeave(pid));
-    this.t.on('data', (pid, d) => this.onHostData(pid, d));
-    this.app.ui?.toast(`Co-op open! Friends join with code <b>${this.code}</b>`, 'good');
+    this.game.on('kill', (car, killer) => {
+      for (const [pid, p] of this.peers) if (killer && p.car === killer) this.t.send(pid, { t: 'kill', n: car.title || car.name });
+    });
+    this.publishSections(true);
     return this.code;
   }
 
-  async join(code, name) {
-    this.isClient = true;
-    this.code = code.toUpperCase().trim();
-    const local = new URLSearchParams(location.search).get('net') === 'local';
-    return new Promise(async (resolve, reject) => {
-      this.onWelcome = resolve;
-      const timer = setTimeout(() => reject(new Error('Could not reach the host. Check the code and that they opened the game to friends.')), 15000);
-      this.onWelcomeTimer = timer;
-      try {
-        if (local) {
-          this.myId = 'c' + Math.random().toString(36).slice(2, 8);
-          this.t = new LocalTransport(this.code, this.myId);
-          this.t.on('data', (pid, d) => this.onClientData(d));
-          this.t.on('disconnect', (pid) => { if (pid === 'host') this.app.onHostLost(); });
-          this.hostId = 'host';
-          this.t.hello(name);
-        } else {
-          this.t = new PeerTransport();
-          this.myId = await this.t.open();
-          this.t.on('data', (pid, d) => this.onClientData(d));
-          this.t.on('disconnect', () => this.app.onHostLost());
-          this.hostId = PREFIX + this.code;
-          this.t.connect(this.hostId, name);
-        }
-      } catch (e) { clearTimeout(timer); reject(e); }
-    });
-  }
+  info() { return { name: this.sim.s?.group.leaderName || this.app.playerName || 'Host', seed: this.sim.s?.seed, day: this.sim.s ? dayOf(this.sim.s.time) : 1, n: this.peers.size + 1 }; }
 
-  // ---------- host side ----------
   onPeerJoin(pid, name) {
     if (this.peers.has(pid)) return;
-    this.peers.set(pid, { name: name || 'Friend', car: null });
-    const g = this.game, sim = this.sim;
-    this.t.send(pid, { t: 'welcome', seed: sim.s.seed, state: sim.serialize(), you: pid, hostName: sim.s.group.leaderName });
-    this.lastKeys = {};
+    this.peers.set(pid, { name: name || 'Friend', car: null, known: new Set(), clock: new Clock(), meta: null, hurt: [] });
+    this.t.send(pid, { t: 'welcome', you: pid, seed: this.sim.s.seed, hostName: this.sim.s.group.leaderName, time: this.sim.s.time });
+    if (!this.t.sectionsViaDb) for (const k of SECTIONS) if (this.secJson[k]) this.t.send(pid, { t: 'sec', k, d: this.secJson[k] });
     this.app.ui?.toast(`🚗 ${name || 'A friend'} joined your group!`, 'good');
-    sim.chronicle('player', { title: `${name || 'A friend'} Joins the Crew`, text: `${name || 'Another driver'} rolled in from the dunes and threw in their lot with ${sim.s.group.leaderName || 'the stranger'}.`, importance: 1 });
-    void g;
+    this.sim.chronicle('player', { title: `${name || 'A friend'} Joins the Crew`, text: `${name || 'Another driver'} rolled in from the dunes and threw in their lot with ${this.sim.s.group.leaderName || 'the stranger'}.`, importance: 1 });
+    this.t.advertise(this.info());
   }
 
   onPeerLeave(pid) {
@@ -146,236 +131,456 @@ export class Net {
     this.peers.delete(pid);
     delete this.sim.s.players[pid];
     this.app.ui?.toast(`${p.name} left.`, 'info');
+    this.t.advertise(this.info());
   }
 
-  onHostData(pid, d) {
+  onHostFast(pid, str) {
     const p = this.peers.get(pid);
-    if (!p) { if (d.t === 'hello') this.onPeerJoin(pid, d.name); return; }
-    switch (d.t) {
-      case 'car': this.applyRemotePlayer(pid, p, d); break;
-      case 'cmd': {
-        const res = this.sim.cmd(d.name, d.args, pid);
-        this.t.send(pid, { t: 'res', id: d.id, res });
-        break;
-      }
-      case 'dmg': { // client hit an NPC (or the host)
-        const car = this.game.carById.get(d.target) || (d.target === 'host' ? this.game.player.car : null);
-        const src = p.car;
-        if (car) this.game.applyDamage(car, d.amt, src, { kind: d.kind, x: d.x, y: d.y, z: d.z, quiet: true, fromNet: true });
-        break;
-      }
-      case 'structDmg': {
-        const b = this.sim.s.bases[d.b];
-        const st = b?.structs.find((s) => s.id === d.s);
-        if (st) this.sim.damageStructure(b, st, d.amt, d.team);
-        break;
-      }
-      case 'shot': this.spawnVisualShot(d); this.broadcastExcept(pid, d); break;
-      case 'fx': this.applyFx(d); this.broadcastExcept(pid, d); break;
-    }
-  }
-
-  broadcastExcept(pid, d) { for (const k of this.peers.keys()) if (k !== pid) this.t.send(k, d); }
-
-  applyRemotePlayer(pid, p, d) {
+    if (!p || typeof str !== 'string' || str.length > 400) return;
+    const sep = str.indexOf('|');
+    if (sep < 0) return;
+    const t = num(parseInt(str.slice(0, sep), 36));
+    let r;
+    try { r = unpackCar(str.slice(sep + 1)); } catch { return; }
+    if (!r.p.every(Number.isFinite)) return;
     const g = this.game;
     if (!p.car || p.car.removed) {
-      p.car = g.spawnCar({ id: 'p_' + pid, name: d.name || p.name, design: d.design, team: this.sim.groupTeam(), x: d.p[0], z: d.p[2], isRemote: true });
+      const opts = { id: 'p_' + pid, name: p.name, team: this.sim.groupTeam(), x: r.p[0], z: r.p[2], isRemote: true };
+      try { p.car = g.spawnCar({ ...opts, design: p.meta?.design || { ...DEFAULT_DESIGN, paint: '#00bbf9' } }); }
+      catch { p.car = g.spawnCar({ ...opts, design: { ...DEFAULT_DESIGN, paint: '#00bbf9' } }); }
       p.car.isRemotePlayer = true;
-      p.car.title = `🎮 ${d.name || p.name}`;
-      p.designKey = JSON.stringify(d.design);
+      p.car.title = `🎮 ${p.name}`;
+      p.car.netClock = p.clock;
+      p.designRef = p.meta?.design || null;
     }
-    if (d.design && JSON.stringify(d.design) !== p.designKey) { p.car.setDesign(d.design); p.designKey = JSON.stringify(d.design); }
-    this.applyCarState(p.car, d);
+    p.clock.see(t);
+    pushSample(p.car, t, r);
+    this.applyRec(p.car, r);
     p.car.team = this.sim.groupTeam();
-    this.sim.cmd('playerPos', { x: d.p[0], z: d.p[2], name: d.name }, pid);
+    this.sim.cmd('playerPos', { x: r.p[0], z: r.p[2], name: p.name }, pid);
   }
 
-  // ---------- client side ----------
-  onClientData(d) {
-    switch (d.t) {
-      case 'welcome':
-        clearTimeout(this.onWelcomeTimer);
-        this.myPid = d.you;
-        this.onWelcome?.(d);
+  onHostMsg(pid, m) {
+    const p = this.peers.get(pid);
+    if (!p || !m || typeof m.t !== 'string') return;
+    switch (m.t) {
+      case 'meta': {
+        if (!m.design || typeof m.design !== 'object') return;
+        p.meta = { design: m.design };
+        if (typeof m.name === 'string' && m.name.trim()) p.name = m.name.slice(0, 20);
+        if (p.car && !p.car.removed) {
+          try { p.car.setDesign(m.design); p.car.view?.build(); } catch (e) { console.warn('[net] bad design from', p.name, e); }
+          p.car.title = `🎮 ${p.name}`;
+        }
         break;
-      case 'state': this.applyState(d); break;
-      case 'cars': this.applyCars(d); break;
-      case 'res': { const r = this.pending.get(d.id); if (r) { this.pending.delete(d.id); r(d.res); } break; }
-      case 'dmgYou': {
+      }
+      case 'cmd': {
+        let res;
+        try { res = this.sim.cmd(String(m.n), m.a || {}, pid); } catch (e) { res = { ok: false, msg: String(e.message || e) }; }
+        this.t.send(pid, { t: 'res', id: m.id, r: safe(res) });
+        this.secT = Math.min(this.secT, 0.2); // let the friend see the result (wallet, missions…) right away
+        break;
+      }
+      case 'dmg': {
+        if (!Array.isArray(m.h)) return;
+        for (const [nid, amt, kind] of m.h) {
+          const car = this.byNid.get(nid);
+          const a = Math.min(MAX_DMG, num(amt));
+          if (car && !car.removed && a > 0) this.game.applyDamage(car, a, p.car, { kind: String(kind || 'bullet'), quiet: true, fromNet: true });
+        }
+        break;
+      }
+      case 'sd': {
+        if (!Array.isArray(m.h)) return;
+        for (const [bid, sid, amt, team] of m.h) {
+          const b = this.sim.s.bases[bid];
+          const st = b?.structs.find((s) => s.id === sid);
+          const a = Math.min(MAX_DMG, num(amt));
+          if (st && a > 0) {
+            this.sim.damageStructure(b, st, a, team || this.sim.groupTeam());
+            if (!this.sim.s.bases[bid]) this.game.emit('razedBase', b);
+          }
+        }
+        break;
+      }
+      case 'nm': if (Array.isArray(m.l)) for (const nid of m.l.slice(0, 64)) p.known.delete(nid); break;
+    }
+  }
+
+  // ---- host → friends ----
+  entry(car) {
+    let e = this.ent.get(car);
+    if (!e) { e = { nid: this.nextNid++, dv: 1, sig: null }; this.ent.set(car, e); this.byNid.set(e.nid, car); }
+    const sig = `${car.team}|${car.title || car.name}|${car.factionColor || ''}`;
+    if (e.design !== car.design || e.sig !== sig) {
+      if (e.sig !== null) { e.dv++; for (const p of this.peers.values()) p.known.delete(e.nid); }
+      e.design = car.design; e.sig = sig;
+    }
+    return e;
+  }
+
+  // snapshot of the cars near the given anchors, closest first, within a byte budget
+  buildFast(anchors, limit, skip) {
+    const g = this.game, list = [];
+    for (const c of g.cars) {
+      if (c.removed || c === skip || c.id === 'titlecam') continue;
+      let d = Infinity;
+      for (const a of anchors) { const dx = c.body.pos.x - a.x, dz = c.body.pos.z - a.z; d = Math.min(d, dx * dx + dz * dz); }
+      if (c.isPlayer || c.isRemotePlayer) d = -1;
+      if (d > VIEW_R * VIEW_R) continue;
+      list.push([d, c]);
+    }
+    list.sort((a, b) => a[0] - b[0]);
+    const squads = packSquads(Object.values(this.sim.s.squads).slice(0, 40));
+    const recs = [], nids = [];
+    let bytes = 40 + squads.length;
+    for (const [, c] of list) {
+      const e = this.entry(c);
+      c.designVer = e.dv;
+      const s = packCar(e.nid, c);
+      if (bytes + s.length + 1 > limit) break;
+      bytes += s.length + 1;
+      recs.push(s); nids.push(e.nid);
+    }
+    return { str: packFast(this.sim.s.time, performance.now(), recs, squads, this.sim.s.group.wallet), nids };
+  }
+
+  sendMetas(pid, p, nids) {
+    const l = [];
+    for (const nid of nids) {
+      if (p.known.has(nid)) continue;
+      const car = this.byNid.get(nid);
+      if (!car) continue;
+      const m = carMeta(nid, car);
+      if (car.isRemotePlayer) for (const [opid, op] of this.peers) if (op.car === car) m.pid = opid;
+      if (car.isPlayer) m.title = `🎮 ${this.app.playerName}`;
+      l.push(m);
+      p.known.add(nid);
+      if (l.length >= 4) { this.t.send(pid, { t: 'meta', l: l.splice(0) }); }
+    }
+    if (l.length) this.t.send(pid, { t: 'meta', l });
+  }
+
+  hostTick(dt) {
+    const hz = FAST_HZ[this.kind];
+    this.fastT -= dt;
+    if (this.fastT <= 0 && this.peers.size) {
+      this.fastT = 1 / hz;
+      if (this.kind === 'room') {
+        // one broadcast snapshot covering every friend
+        const anchors = [];
+        for (const p of this.peers.values()) if (p.car) anchors.push(p.car.body.pos);
+        if (!anchors.length) anchors.push({ x: 0, z: 150 });
+        const f = this.buildFast(anchors, this.t.fastLimit, null);
+        for (const [pid, p] of this.peers) this.sendMetas(pid, p, f.nids);
+        this.t.fastAll(f.str);
+      } else {
+        for (const [pid, p] of this.peers) {
+          const anchor = p.car ? p.car.body.pos : { x: 0, z: 150 };
+          const f = this.buildFast([anchor], this.t.fastLimit, p.car);
+          this.sendMetas(pid, p, f.nids);
+          this.t.fastTo(pid, f.str);
+        }
+      }
+    }
+    this.secT -= dt;
+    if (this.secT <= 0) { this.secT = SECTION_EVERY[this.kind]; this.publishSections(false); }
+    this.flushT -= dt;
+    if (this.flushT <= 0) {
+      this.flushT = 0.1;
+      if (this.evQ.length && this.peers.size) { for (const e of this.evQ) this.t.sendAll(e); }
+      this.evQ.length = 0;
+      for (const [pid, p] of this.peers) if (p.hurt.length) { this.t.send(pid, { t: 'hurt', h: p.hurt.splice(0) }); }
+    }
+    this.sweepT -= dt;
+    if (this.sweepT <= 0) {
+      this.sweepT = 5;
+      for (const [car, e] of this.ent) if (car.removed) { this.ent.delete(car); this.byNid.delete(e.nid); for (const p of this.peers.values()) p.known.delete(e.nid); }
+      this.t.advertise(this.info());
+    }
+  }
+
+  publishSections(force) {
+    if (!this.sim.s) return;
+    for (const k of SECTIONS) {
+      let json;
+      try { json = JSON.stringify(buildSection(this.sim, k)); } catch (e) { console.warn('[net] section', k, e); continue; }
+      if (!force && json === this.secJson[k]) continue;
+      this.secJson[k] = json;
+      if (this.t.sectionsViaDb) this.t.section(k, json);
+      else if (this.peers.size) this.t.sendAll({ t: 'sec', k, d: json });
+    }
+  }
+
+  // ======================================================== client
+  async join(code, name) {
+    this.isClient = true;
+    this.code = code.toUpperCase().trim();
+    this.t = await this.makeTransport();
+    const sections = {};
+    let welcome = null;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(welcome ? 'The host is not sending the world. Try again.' : 'Could not reach the host. Check the code, and that they opened their game to friends.')), 25000);
+      const done = () => {
+        if (!welcome || SECTIONS.some((k) => !sections[k])) return;
+        clearTimeout(timer);
+        this.t.onSection = (k, json) => this.onSection(k, json);
+        this.ready = true;
+        resolve({ ...welcome, sections });
+      };
+      this.t.onSection = (k, json) => { sections[k] = json; done(); };
+      this.t.onMsg = (m) => {
+        if (m.t === 'welcome' && !welcome) { welcome = m; this.myPid = m.you; this.gtBase = num(m.time); this.gtAt = performance.now(); done(); return; }
+        if (m.t === 'sec' && !this.ready) { if (SECTIONS.includes(m.k) && typeof m.d === 'string') { sections[m.k] = m.d; done(); } return; }
+        if (this.ready) this.onClientMsg(m);
+      };
+      this.t.onFast = (s) => { if (this.ready) this.onClientFast(s); };
+      this.t.onLost = (why) => {
+        if (!this.ready) { clearTimeout(timer); reject(new Error(why === 'nodb' ? 'This game cannot share its world here.' : 'The host closed the game.')); return; }
+        this.app.onHostLost();
+      };
+      this.t.join(this.code, name).then((info) => {
+        // the artifact room tells us the host's seed before the welcome: reboot early if the worlds differ
+        if (info?.seed !== undefined && info.seed !== this.app.seed) { clearTimeout(timer); resolve({ seed: info.seed, hostName: info.hostName, early: true }); }
+      }).catch((e) => { clearTimeout(timer); reject(e); });
+    });
+  }
+
+  // apply the sections received during the join (called once the app has a fresh sim to fill)
+  applyJoinSections(sections) {
+    for (const k of SECTIONS) applySection(this.sim, k, JSON.parse(sections[k]));
+    if (this.gtBase !== undefined) this.sim.s.time = this.gtBase;
+  }
+
+  onSection(k, json) {
+    if (!SECTIONS.includes(k) || !this.sim.s) return;
+    let d;
+    try { d = JSON.parse(json); } catch { return; }
+    applySection(this.sim, k, d);
+    if (k === 'core' || k === 'factions') this.app.onTeamChanged?.();
+  }
+
+  onClientMsg(m) {
+    switch (m.t) {
+      case 'sec': if (SECTIONS.includes(m.k) && typeof m.d === 'string') this.onSection(m.k, m.d); break;
+      case 'meta': if (Array.isArray(m.l)) for (const meta of m.l) this.onMeta(meta); break;
+      case 'res': { const r = this.pending.get(m.id); if (r) { this.pending.delete(m.id); r(m.r); } break; }
+      case 'ev': this.app.onSimEvent(m.e, m.d); break;
+      case 'hurt': {
         const car = this.game.player?.car;
-        if (car) this.game.applyDamage(car, d.amt, this.game.carById.get(d.src) || null, { kind: d.kind, fromNet: true, x: d.x, y: d.y, z: d.z });
+        if (!car || !Array.isArray(m.h)) return;
+        for (const [amt, kind, src] of m.h) this.game.applyDamage(car, Math.min(MAX_DMG, num(amt)), this.byNid.get(src) || null, { kind, fromNet: true });
         break;
       }
-      case 'event': this.app.onSimEvent(d.ev, d.data); break;
-      case 'shot': this.spawnVisualShot(d); break;
-      case 'fx': this.applyFx(d); break;
+      case 'kill': this.game.emit('playerKill', { title: String(m.n || 'someone'), name: String(m.n || '') }, null); break;
     }
   }
 
-  applyState(d) {
-    const s = this.sim.s;
-    if (!s) return;
-    Object.assign(s, d.parts);
-    if (d.parts.chronicleTail) {
-      for (const c of d.parts.chronicleTail) if (!s.chronicle.some((x) => x.id === c.id)) s.chronicle.push(c);
-      delete s.chronicleTail;
+  onMeta(meta) {
+    if (!meta || typeof meta.n !== 'number') return;
+    this.metas.set(meta.n, meta);
+    this.needMeta.delete(meta.n);
+    const car = this.byNid.get(meta.n);
+    if (car && !car.removed && car.netDv !== meta.dv) {
+      car.netDv = meta.dv;
+      try { car.setDesign(meta.design); car.view?.build(); } catch (e) { console.warn('[net] design', e); }
+      this.dressReplica(car, meta);
     }
   }
 
-  applyCars(d) {
-    const g = this.game;
-    const seen = new Set();
-    for (const c of d.list) {
-      if (c.id === 'p_' + this.myPid) continue;
-      seen.add(c.id);
-      let car = this.remoteCars.get(c.id);
+  dressReplica(car, meta) {
+    car.title = meta.title || meta.name;
+    car.name = meta.name;
+    car.team = meta.team;
+    car.isRemotePlayer = !!meta.player;
+    car.vip = !!meta.vip;
+    car.factionColor = meta.fc;
+    car.traffic = !!meta.traffic;
+  }
+
+  onClientFast(str) {
+    let f;
+    try { f = unpackFast(str); } catch { return; }
+    this.hostClock.see(f.t);
+    this.gtBase = f.gt; this.gtAt = performance.now();
+    const g = this.game, now = performance.now();
+    for (const r of f.cars) {
+      const meta = this.metas.get(r.nid);
+      if (!meta) { this.needMeta.add(r.nid); continue; }
+      if (meta.pid && meta.pid === this.myPid) continue;
+      if (meta.dv !== r.dv) this.needMeta.add(r.nid);
+      let car = this.byNid.get(r.nid);
       if (!car || car.removed) {
-        car = g.spawnCar({ id: c.id, name: c.name, design: c.design, team: c.team, x: c.p[0], z: c.p[2], isRemote: true });
-        car.title = c.title || c.name;
-        car.isRemotePlayer = !!c.player;
-        car.vip = !!c.vip;
-        car.factionColor = c.fc;
-        car.traffic = !!c.traffic;
-        this.remoteCars.set(c.id, car);
+        const opts = { id: 'r' + r.nid, name: meta.name, team: meta.team, x: r.p[0], z: r.p[2], isRemote: true };
+        try { car = g.spawnCar({ ...opts, design: meta.design }); } catch { car = g.spawnCar({ ...opts, design: DEFAULT_DESIGN }); }
+        car.netDv = meta.dv;
+        car.netNid = r.nid;
+        this.dressReplica(car, meta);
+        this.byNid.set(r.nid, car);
       }
-      this.applyCarState(car, c);
+      this.seen.set(r.nid, now);
+      pushSample(car, f.t, r);
+      this.applyRec(car, r);
     }
-    for (const [id, car] of this.remoteCars) if (!seen.has(id)) { g.removeCar(car); this.remoteCars.delete(id); }
+    if (f.wallet !== null && this.sim.s) this.sim.s.group.wallet = f.wallet;
+    const sq = this.sim.s?.squads;
+    if (sq) for (const [id, p] of Object.entries(f.squads)) { const q = sq[id]; if (q) { q.x = p.x; q.z = p.z; q.tx = p.tx; q.tz = p.tz; } }
   }
 
-  applyCarState(car, d) {
-    car.netTarget = car.netTarget || { p: new THREE.Vector3(), q: new THREE.Quaternion(), v: new THREE.Vector3() };
-    car.netTarget.p.set(d.p[0], d.p[1], d.p[2]);
-    car.netTarget.q.set(d.q[0], d.q[1], d.q[2], d.q[3]);
-    car.netTarget.v.set(d.v[0], d.v[1], d.v[2]);
-    if (!car.netInit) { car.body.pos.copy(car.netTarget.p); car.body.quat.copy(car.netTarget.q); car.netInit = true; }
+  applyRec(car, r) {
     const wasAlive = car.alive;
-    car.hp = d.hp; car.alive = d.alive !== false;
-    if (wasAlive && !car.alive && car.netInit) {
-      const p = car.netTarget.p;
+    car.alive = !!(r.f & FLAG.alive);
+    car.hp = r.hp;
+    if (wasAlive && !car.alive && car.netBuf?.length > 1) {
+      const p = car.body.pos;
       this.game.fx.explosion(p.x, p.y + 1, p.z, 1.2 + car.stats.size * 0.35);
       this.game.fx.wreckDebris(p.x, p.y, p.z, car.design.paint || '#888', 8);
       this.game.audio?.play('bigexplosion', p);
     }
-    car.body.controls.throttle = d.thr || 0;
-    car.body.controls.steer = d.st || 0;
-    car.boostVisual = !!d.b;
-    if (d.w) car.weapons.forEach((w, i) => { if (d.w[i]) { w.yaw = d.w[i][0]; w.pitch = d.w[i][1]; } });
-    if (d.dead && car.alive) { car.alive = false; }
+    car.netFire0 = !!(r.f & FLAG.fire0);
+    car.netFire1 = !!(r.f & FLAG.fire1);
+    car.boostVisual = !!(r.f & FLAG.boost);
+    car.body.controls.throttle = r.thr;
+    car.body.controls.steer = r.st;
+    for (const w of car.weapons) if (w.kind !== 'rear') { w.yaw = r.wy; w.pitch = r.wp; }
   }
 
-  // smooth replicas toward their latest snapshot every physics step
-  smoothRemotes(dt) {
-    for (const car of this.game.cars) {
-      if (!car.isRemote || !car.netTarget) continue;
-      const t = car.netTarget;
-      t.p.addScaledVector(t.v, dt);
-      car.body.vel.copy(t.v);
-      car.body.pos.lerp(t.p, Math.min(1, dt * 12));
-      car.body.quat.slerp(t.q, Math.min(1, dt * 12));
-      car.body.updateFrame();
-      for (const w of car.body.wheels) { w.world.copy(w.local).applyQuaternion(car.body.quat).add(car.body.pos); const gh = this.game.terrain.heightAt(w.world.x, w.world.z); w.contact = w.world.y - gh < car.body.rest + car.body.wheelR + 0.3; w.compression = Math.max(0, car.body.rest + car.body.wheelR - (w.world.y - gh)); w.contactPoint.set(w.world.x, gh, w.world.z); w.spin += t.v.length() / car.body.wheelR * dt; }
+  clientTick(dt) {
+    const g = this.game, now = performance.now();
+    const pc = g.player?.car;
+    // world clock follows the host smoothly
+    const s = this.sim.s;
+    if (s && this.gtBase !== undefined) {
+      const target = this.gtBase + (now - this.gtAt) / 1000;
+      if (Math.abs(target - s.time) > 4) s.time = target;
+      else s.time += dt + (target - s.time) * Math.min(1, dt * 2);
+    }
+    this.fastT -= dt;
+    if (this.fastT <= 0 && pc) {
+      this.fastT = 1 / FAST_HZ[this.kind];
+      pc.designVer = 0;
+      this.t.fast(`${Math.round(now).toString(36)}|${packCar(0, pc)}`);
+    }
+    this.metaT -= dt;
+    if (this.metaT <= 0 && pc) {
+      this.metaT = 1;
+      if (pc.design !== this.sentDesign || this.app.playerName !== this.sentName) {
+        this.sentDesign = pc.design; this.sentName = this.app.playerName;
+        this.t.send({ t: 'meta', name: this.app.playerName, design: pc.design });
+      }
+    }
+    this.flushT -= dt;
+    if (this.flushT <= 0) {
+      this.flushT = this.kind === 'room' ? 0.2 : 0.1;
+      if (this.dmgAcc.size) { this.t.send({ t: 'dmg', h: [...this.dmgAcc].map(([nid, [a, k]]) => [nid, Math.round(a * 10) / 10, k]) }); this.dmgAcc.clear(); }
+      if (this.sdAcc.size) { this.t.send({ t: 'sd', h: [...this.sdAcc.values()].map(([b, st, a, team]) => [b, st, Math.round(a * 10) / 10, team]) }); this.sdAcc.clear(); }
+      if (this.needMeta.size && now - (this.nmAt || 0) > 600) { this.nmAt = now; this.t.send({ t: 'nm', l: [...this.needMeta].slice(0, 32) }); }
+    }
+    this.sweepT -= dt;
+    if (this.sweepT <= 0) {
+      this.sweepT = 0.5;
+      for (const [nid, car] of this.byNid) {
+        if (car.removed || now - (this.seen.get(nid) || 0) > 2500) { if (!car.removed) g.removeCar(car); this.byNid.delete(nid); this.seen.delete(nid); }
+      }
     }
   }
 
-  carMsg(car, extra = {}) {
-    const b = car.body;
-    const r = (v) => Math.round(v * 100) / 100;
-    return {
-      id: car.id, name: car.name, title: car.title, team: car.team, design: car.design, fc: car.factionColor, vip: car.vip, traffic: car.traffic,
-      p: [r(b.pos.x), r(b.pos.y), r(b.pos.z)], q: [r(b.quat.x), r(b.quat.y), r(b.quat.z), r(b.quat.w)], v: [r(b.vel.x), r(b.vel.y), r(b.vel.z)],
-      hp: Math.round(car.hp), alive: car.alive, thr: b.controls.throttle, st: r(b.controls.steer), b: car.boostVisual ? 1 : 0,
-      w: car.weapons.map((w) => [r(w.yaw), r(w.pitch)]), ...extra,
-    };
+  // ======================================================== shared API used by the rest of the game
+  // move replicas along their snapshot timeline; they fire visual-only shots from their triggers
+  preStep(dt) {
+    const g = this.game;
+    const now = performance.now();
+    for (const car of g.cars) {
+      if (!car.isRemote || !car.netBuf) continue;
+      const clock = car.netClock || this.hostClock;
+      if (!sampleAt(car, clock.now(now))) continue;
+      const b = car.body;
+      b.updateFrame();
+      const sp = b.vel.length();
+      for (const w of b.wheels) {
+        w.world.copy(w.local).applyQuaternion(b.quat).add(b.pos);
+        const gh = g.terrain.heightAt(w.world.x, w.world.z);
+        w.contact = w.world.y - gh < b.rest + b.wheelR + 0.3;
+        w.compression = Math.max(0, b.rest + b.wheelR - (w.world.y - gh));
+        w.contactPoint.set(w.world.x, gh, w.world.z);
+        w.spin += (sp / b.wheelR) * dt;
+      }
+      if (!car.alive) continue;
+      for (const w of car.weapons) {
+        w.cooldown = Math.max(0, w.cooldown - dt);
+        const trig = w.kind === 'rear' ? car.netFire1 : car.netFire0;
+        if (!trig) continue;
+        w.aligned = true;
+        car.ammo = car.energy = car.fuel = 1e6;
+        g.combat.tryFire(car, w, dt);
+      }
+    }
   }
 
-  // ---------- RPC ----------
+  // all damage is decided where the shooter lives; replicas only forward it
+  sendDamage(target, amount, source, opts) {
+    if (opts.fromNet) return;
+    if (this.isClient) {
+      if (!source?.isPlayer || !target.netNid) return;
+      const acc = this.dmgAcc.get(target.netNid) || [0, opts.kind || 'bullet'];
+      acc[0] += amount;
+      this.dmgAcc.set(target.netNid, acc);
+      return;
+    }
+    for (const p of this.peers.values()) {
+      if (p.car !== target) continue;
+      const src = source ? this.ent.get(source)?.nid || 0 : 0;
+      const last = p.hurt[p.hurt.length - 1];
+      if (last && last[1] === (opts.kind || 'bullet') && last[2] === src) last[0] += amount;
+      else p.hurt.push([amount, opts.kind || 'bullet', src]);
+    }
+  }
+
+  // legacy entry point (structure damage from a client)
+  send(d) {
+    if (this.isClient && d?.t === 'structDmg') {
+      const key = d.b + '|' + d.s;
+      const acc = this.sdAcc.get(key) || [d.b, d.s, 0, d.team];
+      acc[2] += d.amt;
+      this.sdAcc.set(key, acc);
+    }
+  }
+
   request(name, args) {
     const id = this.reqId++;
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      this.t.send(this.hostId, { t: 'cmd', id, name, args });
-      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); resolve({ ok: false, msg: 'Host did not answer' }); } }, 8000);
+      this.t.send({ t: 'cmd', id, n: name, a: safe(args) });
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); resolve({ ok: false, msg: 'The host did not answer.' }); } }, 10000);
     });
   }
 
-  send(d) { if (this.isClient) this.t.send(this.hostId, d); else this.t.broadcast(d); }
+  event(ev, data) { if (this.isHost && this.peers.size) this.evQ.push({ t: 'ev', e: ev, d: data }); }
 
-  sendDamage(target, amount, source, opts) {
-    if (opts.fromNet) return;
-    if (this.isClient) {
-      // only report damage we dealt
-      if (source && source.isPlayer) this.t.send(this.hostId, { t: 'dmg', target: target.id, amt: amount, kind: opts.kind, x: opts.x, y: opts.y, z: opts.z });
-      return;
-    }
-    // host: damage to a remote player's car goes to that player
-    for (const [pid, p] of this.peers) if (p.car === target) this.t.send(pid, { t: 'dmgYou', amt: amount, kind: opts.kind, src: source?.id, x: opts.x, y: opts.y, z: opts.z });
-  }
-
-  shot(p) {
-    // mirror projectile spawns so everyone sees the same fireworks
-    const d = { t: 'shot', k: p.kind, x: p.x, y: p.y, z: p.z, vx: p.vx, vy: p.vy, vz: p.vz, team: p.team, life: p.life, grav: p.grav, splash: p.splash };
-    if (this.isClient) this.t.send(this.hostId, d); else this.t.broadcast(d);
-  }
-  spawnVisualShot(d) {
-    this.game.combat.spawn({ kind: d.k, owner: null, team: d.team, x: d.x, y: d.y, z: d.z, vx: d.vx, vy: d.vy, vz: d.vz, dmg: 0, life: d.life, grav: d.grav, splash: d.splash || 0, visual: true });
-  }
-  fx(kind, data) { const d = { t: 'fx', kind, ...data }; if (this.isClient) this.t.send(this.hostId, d); else this.t.broadcast(d); }
-  applyFx(d) { if (d.kind === 'explosion') this.game.fx.explosion(d.x, d.y, d.z, d.s || 1); }
-
-  // ---------- tick ----------
   update() {
     if (!this.t) return;
-    // wall-clock timers: network cadence must not slow down when the frame rate drops
-    const now = performance.now() / 1000;
-    const dt = Math.min(1, now - (this._lastNow || now));
-    this._lastNow = now;
-    this.carT -= dt; this.stateT -= dt;
-    const g = this.game;
-    if (this.isClient) {
-      if (this.carT <= 0 && g.player?.car) {
-        this.carT = CAR_RATE;
-        const c = g.player.car;
-        this.t.send(this.hostId, { t: 'car', ...this.carMsg(c, { name: this.app.playerName, design: c.design }) });
-      }
-      return;
-    }
-    if (!this.peers.size) return;
-    if (this.carT <= 0) {
-      this.carT = CAR_RATE;
-      for (const [pid, p] of this.peers) {
-        const pc = p.car;
-        const list = [];
-        for (const c of g.cars) {
-          if (c === pc) continue;
-          if (pc && c.body.pos.distanceTo(pc.body.pos) > 900) continue;
-          list.push(this.carMsg(c, c.isPlayer ? { player: 1, title: `🎮 ${this.app.playerName}` } : c.isRemotePlayer ? { player: 1 } : {}));
-        }
-        this.t.send(pid, { t: 'cars', list });
-      }
-    }
-    if (this.stateT <= 0) {
-      this.stateT = STATE_RATE;
-      const s = this.sim.s;
-      const parts = {};
-      for (const k of Object.keys(s)) {
-        if (k === 'chronicle') continue;
-        const json = JSON.stringify(s[k]);
-        if (this.lastKeys[k] !== json) { parts[k] = s[k]; this.lastKeys[k] = json; }
-      }
-      parts.chronicleTail = s.chronicle.slice(-12);
-      this.t.broadcast({ t: 'state', parts });
-    }
+    // wall-clock: network cadence must not slow down when the frame rate does
+    const now = performance.now();
+    const dt = Math.min(1, (now - (this.lastNow || now)) / 1000);
+    this.lastNow = now;
+    if (this.isHost) this.hostTick(dt);
+    else if (this.ready) this.clientTick(dt);
+    this.t.update(dt);
   }
 
-  event(ev, data) { if (this.isHost && this.peers.size) this.t.broadcast({ t: 'event', ev, data }); }
-
   statusHTML() {
-    const list = [...this.peers.values()].map((p) => `<li>🚗 ${p.name}</li>`).join('');
-    if (this.isClient) return `<div class="center-msg"><h3>Connected to host</h3><p>Code <b>${this.code}</b>. The host's world is authoritative; you share their group, wallet and faction.</p></div>`;
-    return `<div class="center-msg"><h3>Co-op is open</h3><p>Friends join from the title screen with this code:</p><div class="bigcode">${this.code}</div><button data-action="copyCode">Copy code</button><h4>In your group</h4><ul>${list || '<li class="muted">Nobody yet</li>'}</ul><p class="muted small">Peer-to-peer over WebRTC. A free public broker is used only to introduce your browsers; the game runs on your machine.</p></div>`;
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    if (this.isClient) return `<div class="center-msg"><h3>Riding with your host</h3><p>Game <b>${esc(this.code)}</b>. The host's world is the real one: you share their crew, wallet and faction.</p></div>`;
+    const list = [...this.peers.values()].map((p) => `<li>🚗 ${esc(p.name)}</li>`).join('');
+    const link = this.inviteLink();
+    const how = this.kind === 'room'
+      ? '<p>Friends open this same artifact link and pick your game under <b>Join a Friend</b>. They need to be signed in to claude.ai and have access to the artifact (share it with them).</p>'
+      : `<p>Send friends this link — it drops them straight into your game:</p><div class="invite"><input readonly value="${esc(link)}" onclick="this.select()"/><button data-action="copyInvite">Copy link</button></div><p class="muted small">Or they press <b>Join a Friend</b> and type the code.</p>`;
+    return `<div class="center-msg"><h3>Co-op is open</h3><div class="bigcode">${esc(this.code)}</div>${how}<h4>In your group</h4><ul>${list || '<li class="muted">Nobody yet</li>'}</ul><p class="muted small">${this.kind === 'room' ? 'Runs through claude.ai: no setup, but updates are a little slower than a direct connection.' : 'Peer-to-peer: your browser runs the world and friends connect straight to you.'} Keep this tab open while friends play.</p></div>`;
   }
 
   close() { this.t?.close(); }
 }
+
+function safe(v) { try { return v === undefined ? null : JSON.parse(JSON.stringify(v)); } catch { return null; } }
+void THREE;

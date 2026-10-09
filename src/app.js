@@ -8,7 +8,8 @@ import { Structures } from './world/structures.js';
 import { Director } from './director.js';
 import { UI, esc } from './ui/ui.js';
 import { Audio } from './audio.js';
-import { Net } from './net/net.js';
+import { Net, NET_KIND } from './net/net.js';
+import { artifactCaps, watchLobby } from './net/transports.js';
 import { DEFAULT_DESIGN, CHASSIS } from './vehicle/parts.js';
 import { timeOfDay, dayOf, DAY_LEN, TILE, STRUCTS } from './sim/defs.js';
 import { HUB_SAFE_R } from './sim/constants.js';
@@ -63,15 +64,34 @@ export class App {
     this.game.onAttackFriendly = (team, car) => this.onAttackFriendly(team, car);
     this.player = new PlayerController(this.game);
     this.game.player = this.player;
-    this.game.preStep = (dt) => { this.player.update(dt); this.net?.smoothRemotes(dt); };
+    this.game.preStep = (dt) => { this.player.update(dt); this.net?.preStep(dt); };
     this.hookGameEvents();
+    this.initCoop();
     this.hideLoading();
     this.last = performance.now();
     requestAnimationFrame((t) => this.loop(t));
     if (params.get('autostart') === '1') this.startNew({ name: params.get('name') || 'Tester', color: '#ff7f50', difficulty: 'normal' });
     else if (params.get('continue') === '1' && saved) this.continueGame();
-    else if (params.get('join')) this.showTitle(params.get('join'));
-    else this.showTitle();
+    else if (params.get('join')) {
+      this.showTitle(params.get('join'));
+      if (params.get('autojoin') === '1' && params.get('name')) this.doJoin(params.get('join'), params.get('name'));
+    } else this.showTitle();
+  }
+
+  // Co-op availability: the hosted build always can; inside a claude.ai artifact it rides the room capability
+  initCoop() {
+    this.canHost = true;
+    this.coopReady = Promise.resolve(true);
+    if (NET_KIND !== 'room') return;
+    this.canHost = null; // unknown until the artifact answers
+    this.coopReady = artifactCaps().then(async (caps) => {
+      this.caps = caps;
+      if (!caps.room || !caps.db) { this.canHost = false; return false; }
+      try { this.canHost = caps.user ? await caps.user.canEdit() : null; } catch { this.canHost = null; }
+      return true;
+    });
+    // keep the world running for friends while the host's tab is in the background
+    document.addEventListener('visibilitychange', () => this.onVisibility());
   }
 
   showLoading(msg, p) {
@@ -98,7 +118,7 @@ export class App {
       <div class="title-btns">
         <button data-act="new">🚗 New Game</button>
         ${saved ? `<button data-act="continue">▶ Continue <small>${esc(saved.name || '')} · Day ${saved.day || 1}</small></button>` : ''}
-        ${COOP_AVAILABLE ? '<button data-act="join">🌐 Join a Friend</button>' : ''}
+        <button data-act="join">🌐 Join a Friend</button>
         <button data-act="help" class="ghost">How to play</button>
       </div><div id="title-sub"></div><p class="muted small">WASD drive · mouse aim · click to fire · E interact · Esc menu</p></div>`;
     scr.classList.remove('hidden');
@@ -117,7 +137,7 @@ export class App {
         this.saveSettings();
         this.startNew({ name, color: document.getElementById('ng-color').value, difficulty: document.getElementById('ng-diff').value, seed: +document.getElementById('ng-seed').value || this.seed });
       }
-      if (act === 'doJoin') this.doJoin(document.getElementById('jn-code').value, document.getElementById('jn-name').value.trim() || 'Friend');
+      if (act === 'doJoin') this.doJoin(b.dataset.code || document.getElementById('jn-code').value, document.getElementById('jn-name').value.trim() || 'Friend');
     };
     if (joinCode) this.joinForm(joinCode);
   }
@@ -133,10 +153,30 @@ export class App {
   }
 
   joinForm(code = '') {
-    this.ui.$('title-sub').innerHTML = `<div class="form"><label>Host's code <input id="jn-code" maxlength="8" value="${esc(code)}" placeholder="ABCDE" style="text-transform:uppercase"/></label><label>Your name <input id="jn-name" maxlength="20" value="${esc(this.settings.name || '')}"/></label><button data-act="doJoin">Join ➜</button><p class="muted small">The host must open their game to friends (Esc → Co-op). You'll join their group and share their faction.</p></div>`;
+    const room = NET_KIND === 'room';
+    this.ui.$('title-sub').innerHTML = `<div class="form"><label>Your name <input id="jn-name" maxlength="20" value="${esc(this.settings.name || '')}"/></label>
+      ${room ? '<div id="jn-games" class="games"><p class="muted small">Looking for open games…</p></div>' : ''}
+      <label>${room ? 'Or type a' : 'Host\'s'} code <input id="jn-code" maxlength="8" value="${esc(code)}" placeholder="ABCDE" style="text-transform:uppercase"/></label><button data-act="doJoin">Join ➜</button>
+      <p class="muted small">${room ? 'The host opens their game with Esc → Co-op → Open to friends. Their game then shows up here.' : 'Easiest: ask the host for their invite link (Esc → Co-op) and just open it.'} You'll join their crew and share their faction.</p></div>`;
+    if (room) this.listGames();
   }
 
-  hideTitle() { const scr = this.ui.$('screen'); scr.classList.add('hidden'); scr.onclick = null; }
+  async listGames() {
+    this.stopLobby?.();
+    const ok = await this.coopReady;
+    const el = () => document.getElementById('jn-games');
+    if (!ok) { if (el()) el().innerHTML = '<p class="warn">Co-op needs you to be signed in to claude.ai with access to this artifact.</p>'; return; }
+    this.stopLobby = watchLobby(this.caps.room, (games) => {
+      const box = el();
+      if (!box) { this.stopLobby?.(); this.stopLobby = null; return; }
+      const list = games.filter((g) => !g.mine);
+      box.innerHTML = list.length
+        ? list.map((g) => `<button class="game-pick" data-act="doJoin" data-code="${esc(g.code)}">🚗 ${esc(g.host)}'s world <small>Day ${g.day} · ${g.n} driver${g.n === 1 ? '' : 's'}</small></button>`).join('')
+        : '<p class="muted small">No open games yet. When a friend opens theirs it appears here.</p>';
+    });
+  }
+
+  hideTitle() { const scr = this.ui.$('screen'); scr.classList.add('hidden'); scr.onclick = null; this.stopLobby?.(); this.stopLobby = null; }
 
   // ---------- starting ----------
   async startNew(opts) {
@@ -196,7 +236,7 @@ export class App {
       this.headlight = new THREE.SpotLight(0xfff1c1, 0, 140, 0.55, 0.6, 1.2);
       this.game.scene.add(this.headlight, this.headlight.target);
     }
-    this.game.input.wantLock = true;
+    this.setMenuOpen(false, 'title'); // the title backdrop blocks input; release it however play starts
     this.lastTeam = this.sim.groupTeam();
   }
 
@@ -248,30 +288,79 @@ export class App {
 
   // ---------- co-op ----------
   async startHosting() {
-    if (this.net) return;
-    this.net = new Net(this);
-    this.game.net = this.net;
-    try { await this.net.host(); } catch (e) { this.ui.toast(`Co-op failed: ${esc(e.message || e)}`, 'bad'); this.net = null; this.game.net = null; }
+    if (this.net || this.hosting) return;
+    this.hosting = true;
+    try {
+      if (!(await this.coopReady)) { this.ui.toast('Co-op needs you to be signed in to claude.ai.', 'bad'); return; }
+      if (this.canHost === false) { this.ui.toast('Only the owner or editors of this artifact can host.', 'bad'); return; }
+      this.net = new Net(this);
+      this.game.net = this.net;
+      await this.net.host();
+      this.ui.toast(NET_KIND === 'room' ? 'Co-op open! Friends will see your game under Join a Friend.' : 'Co-op open! Copy your invite link from this tab.', 'good');
+    } catch (e) {
+      console.warn('[net] host failed', e);
+      this.ui.toast(`Co-op failed: ${esc(e.message || e.type || e)}`, 'bad');
+      this.net?.close(); this.net = null; this.game.net = null;
+    } finally { this.hosting = false; }
   }
 
   async doJoin(code, name) {
+    code = String(code || '').toUpperCase().trim();
+    if (!code) { this.ui.$('title-sub').querySelector('#jn-code')?.focus(); return; }
+    if (this.joining) return;
+    this.joining = true;
     this.playerName = name;
     this.settings.name = name; this.saveSettings();
-    this.ui.$('title-sub').innerHTML = '<p>Connecting…</p>';
+    this.stopLobby?.(); this.stopLobby = null;
+    this.ui.$('title-sub').innerHTML = '<p>Connecting… (loading the host\'s world can take a few seconds)</p>';
+    if (!(await this.coopReady)) { this.ui.$('title-sub').innerHTML = '<p class="warn">Co-op needs you to be signed in to claude.ai with access to this artifact.</p>'; this.joining = false; return; }
     this.net = new Net(this);
     this.game.net = this.net;
     try {
       const welcome = await this.net.join(code, name);
-      if (welcome.seed !== this.seed) { this.net.close(); reboot({ seed: welcome.seed, join: code }); return; }
-      this.sim.load(welcome.state);
+      if (welcome.seed !== this.seed) { this.net.close(); reboot({ seed: welcome.seed, join: code, autojoin: 1, name }); return; }
+      this.sim.newGame(welcome.seed, {});
+      this.resetTerrain();
+      this.net.applyJoinSections(welcome.sections);
       for (const e of this.sim.s.terrainEdits) this.game.terrain.flatten(...e);
       this.sim.isReplica = true;
       this.startPlaying({ design: { ...DEFAULT_DESIGN, paint: '#00bbf9', name: `${name}'s ride` }, x: 12, z: 150, heading: 0 });
       this.ui.banner('JOINED!', `You ride with ${esc(welcome.hostName || 'your friend')}`, '#00e5ff');
     } catch (e) {
-      this.ui.$('title-sub').innerHTML = `<p class="warn">${esc(e.message || e)}</p>`;
-      this.net = null; this.game.net = null;
+      console.warn('[net] join failed', e);
+      this.ui.$('title-sub').innerHTML = `<p class="warn">${esc(e.message || e.type || e)}</p><button data-act="join">Try again</button>`;
+      this.net?.close(); this.net = null; this.game.net = null;
+    } finally { this.joining = false; }
+  }
+
+  // ---------- host in a background tab ----------
+  // Browsers stop animation frames in hidden tabs, which would freeze the world for everyone.
+  // While hosting, a worker-driven timer keeps the simulation (not the rendering) going.
+  onVisibility() {
+    const want = document.hidden && this.net?.isHost && this.mode === 'play';
+    if (want && !this.bgTicker) {
+      this.bgLast = performance.now();
+      this.bgTicker = makeTicker(() => this.bgTick(), 50);
+    } else if (!want && this.bgTicker) {
+      this.bgTicker.stop(); this.bgTicker = null;
+      this.last = performance.now();
     }
+  }
+
+  bgTick() {
+    if (!document.hidden || !this.net?.isHost || this.mode !== 'play') { this.onVisibility(); return; }
+    const now = performance.now();
+    const dt = Math.min(0.25, (now - this.bgLast) / 1000);
+    this.bgLast = now;
+    if (dt <= 0) return;
+    const g = this.game, sim = this.sim;
+    sim.tick(dt);
+    this.bridge.update(dt);
+    g.director.update(dt);
+    const pc = this.player.car;
+    sim.cmd('playerPos', { x: pc.body.pos.x, z: pc.body.pos.z, name: this.playerName }, 'host');
+    g.frame(dt, false);
+    this.net.update(dt);
   }
   onHostLost() { this.ui.toast('Lost connection to the host.', 'bad'); setTimeout(() => this.quitToTitle(), 3000); }
 
@@ -298,7 +387,9 @@ export class App {
       this.sim.noteStunt(air);
       if (flips + spins >= 2) this.sim.addDeed('racer', 0.2);
     });
-    g.on('playerKill', (car, n) => {
+    g.on('playerKill', (car, n, killer) => {
+      // a co-op partner's kill: the group still gets the credit, only the shooter gets the fanfare
+      if (killer && !killer.isPlayer) { if (!this.net?.isClient) this.creditKill(car, n); return; }
       const now = performance.now();
       this.killStreak = now - (this.lastKill || 0) < 5000 ? (this.killStreak || 1) + 1 : 1;
       this.lastKill = now;
@@ -306,14 +397,7 @@ export class App {
       this.ui.stunt(words[Math.min(words.length - 1, this.killStreak - 1)], esc(car.title || car.name));
       this.audio.play('stunt');
       if (this.net?.isClient) return;
-      const sim = this.sim;
-      sim.noteKill(car.team, n);
-      const f = sim.s.factions[car.team];
-      if (f && !f.bandit) {
-        sim.changeRep(f.id, n?.role === 'lieutenant' ? -10 : -5);
-        for (const e of sim.enemies(f.id)) sim.changeRep(e.id, 2);
-      }
-      for (const m of Object.values(sim.s.missions)) if (m.status === 'active' && m.obj.kind === 'killNpc' && m.obj.npcId === car.npcId) this.ui.toast('Target eliminated!', 'good');
+      this.creditKill(car, n);
     });
     g.on('playerDied', (car, killer) => { if (car.isPlayer) this.onPlayerDeath(killer); });
     g.on('smash', (t) => { if (t === 'cactus' && Math.random() < 0.15) this.ui.toast('🌵 Sorry, cactus.', 'info', 'cactus'); });
@@ -321,6 +405,22 @@ export class App {
       // honking in the Hub makes locals honk back
       for (const c of g.cars) if (c.traffic && c.body.pos.distanceTo(g.player.car.body.pos) < 40 && Math.random() < 0.5) setTimeout(() => this.audio.play('honk', c.body.pos), 300 + Math.random() * 500);
     });
+    this.hookCollect();
+  }
+
+  creditKill(car, n) {
+    const sim = this.sim;
+    sim.noteKill(car.team, n);
+    const f = sim.s.factions[car.team];
+    if (f && !f.bandit) {
+      sim.changeRep(f.id, n?.role === 'lieutenant' ? -10 : -5);
+      for (const e of sim.enemies(f.id)) sim.changeRep(e.id, 2);
+    }
+    for (const m of Object.values(sim.s.missions)) if (m.status === 'active' && m.obj.kind === 'killNpc' && m.obj.npcId === car.npcId) this.ui.toast('Target eliminated!', 'good');
+  }
+
+  hookCollect() {
+    const g = this.game;
     g.onCollect = (car, got, node) => {
       if (!car.isPlayer) return;
       this.audio.play('pickup');
@@ -696,5 +796,16 @@ function reboot(params) {
   session.set('dustbowl-boot', JSON.stringify(params));
   location.reload();
 }
-export const COOP_AVAILABLE = import.meta.env?.MODE !== 'artifact';
+// A steady timer that keeps firing in background tabs (worker timers are not throttled like page timers)
+function makeTicker(fn, ms) {
+  let id = null, w = null;
+  const fallback = () => { if (w) { w.terminate(); w = null; } if (id === null) id = setInterval(fn, ms); };
+  try {
+    const url = URL.createObjectURL(new Blob([`const i=setInterval(()=>postMessage(0),${ms});onmessage=()=>clearInterval(i);`], { type: 'text/javascript' }));
+    w = new Worker(url);
+    w.onmessage = fn;
+    w.onerror = fallback;
+  } catch { fallback(); }
+  return { stop() { if (w) w.terminate(); if (id !== null) clearInterval(id); w = null; id = null; } };
+}
 export { RES_INFO, STRUCTS, portrait, CHASSIS };

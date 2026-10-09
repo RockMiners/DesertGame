@@ -1,7 +1,7 @@
 // The Storyteller: a director that pulls events "from a hat", runs premade story arcs, then generates
 // procedural arcs forever. It paces tension and makes sure the player is the main character.
 import { Sim } from './sim.js';
-import { DAY_LEN, STRUCTS } from './defs.js';
+import { DAY_LEN, STRUCTS, HUB_QUIET_R } from './defs.js';
 import { genFaction, genDriverName } from './lore.js';
 import { PRESET_DESIGNS } from '../vehicle/parts.js';
 import { RES_INFO } from '../world/biomes.js';
@@ -404,10 +404,15 @@ const ARCS = {
       this.s.story.bonusNodes = (this.s.story.bonusNodes || []).concat(Array.from({ length: 10 }, (_, i) => ({ id: `gr${this.s.time | 0}_${i}`, zoneId: zd.id, res, x: Math.round(zd.cx + this.rng.range(-160, 160)), z: Math.round(zd.cz + this.rng.range(-160, 160)), amount: 12 })));
       this.emit('bonusNodes');
       this.chronicle('event', { title: `${RES_INFO[res].name} Rush in ${zd.name}`, text: `A scavenger stumbled into ${zd.name} with pockets full of ${RES_INFO[res].name.toLowerCase()}. By sundown, every faction with wheels was headed there.${z.claimable ? ' Nobody owns it. Yet.' : ''}`, importance: 2 });
-      // factions send scavenging parties
-      for (const f of aliveFactions(this).filter((x) => !x.isPlayer).slice(0, 3)) {
+      // the two nearest factions at most send prospecting parties, and only as a pair of cars
+      const near = (f) => { const c = this.capital(f.id); return c ? Math.hypot(c.x - zd.cx, c.z - zd.cz) : Infinity; };
+      let sent = 0;
+      for (const f of aliveFactions(this, (x) => !x.isPlayer).sort((a, b) => near(a) - near(b))) {
+        if (sent >= 2) break;
         const fs = this.availableFighters(f).slice(0, 2);
-        if (fs.length) this.createSquad(f.id, fs.map((n) => n.id), { type: 'scavenge', zoneId: zd.id, legs: 3 }, { name: `${f.short} prospectors` });
+        if (fs.length < 2) continue;
+        sent++;
+        this.createSquad(f.id, fs.map((n) => n.id), { type: 'scavenge', zoneId: zd.id, legs: 3 }, { name: `${f.short} prospectors` });
       }
       this.createMission({ giver: 'hub', type: 'reach', title: `Stake a Claim in ${zd.name}`, desc: `Get to ${zd.name} and grab the ${RES_INFO[res].name.toLowerCase()} before the factions strip it bare.`, obj: { kind: 'reach', x: zd.cx, z: zd.cz, r: 120 }, reward: { caps: 60 }, board: true });
     },
@@ -696,6 +701,7 @@ const CARDS = [
   {
     id: 'rich_caravan', minDay: 2, cooldown: DAY_LEN,
     prepare() {
+      if (Object.values(this.s.squads).filter((q) => q.task.type === 'trade').length >= 3) return null;
       const m = aliveFactions(this, (f) => !f.isPlayer && f.traits.greed > 0.5 && this.capital(f.id));
       return m.length ? { f: this.rng.pick(m).id } : null;
     },
@@ -704,7 +710,7 @@ const CARDS = [
       const f = this.s.factions[ctx.f];
       const cap = this.capital(f.id);
       const crew = this.availableFighters(f, cap).slice(0, 3);
-      if (!crew.length) return;
+      if (crew.length < 2 && (!crew.length || this.members(f.id).length >= 4)) return; // a treasure truck never rides alone
       crew[0].design = { ...this.styleDesign(f, false), chassis: 'truck', engine: 'diesel', wheels: 'standard', armor: 'medium', weapons: [null, 'mg', null, null], utils: ['cargoRack', null, null, null, null] };
       const sq = this.createSquad(f.id, crew.map((n) => n.id), { type: 'trade' }, { from: cap, cargo: { crystal: 20, electronics: 25, fuel: 40 }, speed: 8, name: `${f.short} treasure caravan` });
       const rivals = this.enemies(f.id).filter((e) => !e.isPlayer);
@@ -785,10 +791,12 @@ const CARDS = [
     run() {
       this.ensureScavFaction();
       const ids = [];
-      const n = 4 + Math.min(6, this.day);
+      const n = 4 + Math.min(4, Math.floor(this.day / 2));
       for (let i = 0; i < n; i++) ids.push(this.createNpc('scavvers', 'driver', { design: this.rng.chance(0.3) ? { ...PRESET_DESIGNS.raider } : { ...PRESET_DESIGNS.scav }, skill: 0.35 }).id);
       const a = this.rng.range(0, Math.PI * 2);
-      const sq = this.createSquad('scavvers', ids, { type: 'hunt', x: Math.cos(a) * 240, z: Math.sin(a) * 240 }, { x: Math.cos(a) * 700, z: Math.sin(a) * 700, name: 'Scavver horde', speed: 12 });
+      const x0 = Math.cos(a) * 700, z0 = Math.sin(a) * 700;
+      const home = Object.values(this.s.bases).filter((b) => b.scav).sort((a1, b1) => Math.hypot(a1.x - x0, a1.z - z0) - Math.hypot(b1.x - x0, b1.z - z0))[0];
+      const sq = this.createSquad('scavvers', ids, { type: 'hunt', x: Math.cos(a) * 240, z: Math.sin(a) * 240 }, { x: x0, z: z0, from: home, name: 'Scavver horde', speed: 12 });
       this.createMission({ giver: 'hub', type: 'defend', title: 'Defend the Hub', desc: 'A Scavver horde is circling the Hub walls. Break it before it strangles the trade roads.', obj: { kind: 'killSquad', squadId: sq.id, x: sq.x, z: sq.z }, reward: { caps: 180, rep: Object.fromEntries(aliveFactions(this).map((f) => [f.id, 5])) }, board: true });
       this.emit('warning', 'A Scavver horde is closing on the Hub!', null);
       this.chronicle('event', { title: 'The Horde at the Gates', text: `${n} Scavver cars howled around the Hub walls all afternoon, cutting off the trade roads.`, importance: 1 });
@@ -819,15 +827,17 @@ const CARDS = [
     run(ctx) {
       const zd = this.zoneDef(ctx.zoneId);
       this.s.story.bunkers = (this.s.story.bunkers || 0) + 1;
-      const a = this.rng.range(0, Math.PI * 2), r = this.rng.range(60, 220);
-      const x = Math.round(zd.cx + Math.cos(a) * r), z = Math.round(zd.cz + Math.sin(a) * r);
+      // the hatch (and the scavvers squatting on it) sits out in the wilds, clear of the Hub roads
+      const spot = this.zonePoint(zd.id, zd.cx, zd.cz, 60, 220, HUB_QUIET_R);
+      const x = Math.round(spot.x), z = Math.round(spot.z);
       const tier = ctx.n < 2 ? 2 : 3;
       const parts = tier === 2 ? this.rng.pick([['cannon', 'rockets'], ['turbo', 'diesel'], ['solar', 'battery'], ['jumpjets', 'repair']]) : this.rng.pick([['laser', 'tesla'], ['hover', 'fusion'], ['shield', 'reactive'], ['rig']]);
       // guardians
       this.ensureScavFaction();
       const ids = [];
       for (let i = 0; i < 2 + ctx.n; i++) ids.push(this.createNpc('scavvers', 'driver', { design: { ...PRESET_DESIGNS[ctx.n > 2 ? 'raider' : 'scav'] }, skill: 0.4 + ctx.n * 0.05 }).id);
-      this.createSquad('scavvers', ids, { type: 'patrol', zoneId: zd.id, x, z, legs: 60 }, { x: x + 40, z: z + 40, speed: 6, name: 'Bunker squatters' });
+      const k = 1 + 40 / Math.max(1, Math.hypot(x, z)); // squat just outboard of the hatch
+      this.createSquad('scavvers', ids, { type: 'patrol', zoneId: zd.id, x, z, legs: 60 }, { x: x * k, z: z * k, speed: 6, name: 'Bunker squatters' });
       const m = this.createMission({ giver: 'hub', type: 'explore', title: `The Bunker in ${zd.name}`, desc: `A sand slide uncovered an Old-World bunker door in ${zd.name}. Scavvers are already sniffing around. Get inside first.`, obj: { kind: 'reach', x, z, r: 14 }, reward: { caps: 80 + ctx.n * 40, unlock: parts, unlockTier: ctx.n >= 3 ? 3 : undefined }, board: true, expires: this.s.time + DAY_LEN * 3 });
       this.chronicle('event', { title: `A Door in the Sand`, text: `An Old-World bunker hatch has surfaced in ${zd.name}. Whatever is inside has been waiting 41 years.`, importance: 1 });
       this.emit('notice', `Rumour: an Old-World bunker surfaced in ${zd.name}. (${m.title})`);

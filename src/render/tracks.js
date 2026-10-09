@@ -1,5 +1,8 @@
 // Tyre tracks: ring buffer of ground-hugging quads that fade with age.
 import * as THREE from 'three';
+import { markRange } from './perf.js';
+
+const SLICES = 8; // fade 1/SLICES of the buffer per frame
 
 export class Tracks {
   constructor(scene, cap = 6000) {
@@ -23,6 +26,8 @@ export class Tracks {
     this.time = 0;
     this.last = new Map();
     this.life = 40;
+    this.slice = 0;
+    this.aLo = -1; this.aHi = -1; // contiguous run of segments written since the last upload
   }
   // key identifies a wheel; returns nothing
   add(key, x, y, z, nx, nz, width, color, alpha = 0.35) {
@@ -31,7 +36,7 @@ export class Tracks {
     const dx = x - prev.x, dz = z - prev.z;
     const d2 = dx * dx + dz * dz;
     if (d2 < 0.5 * 0.5) return;
-    if (d2 > 9 || this.time - prev.t > 0.3) { this.last.set(key, { x, y, z, nx, nz, t: this.time }); return; }
+    if (d2 > 9 || this.time - prev.t > 0.3) { prev.x = x; prev.y = y; prev.z = z; prev.nx = nx; prev.nz = nz; prev.t = this.time; return; }
     const i = this.head;
     this.head = (this.head + 1) % this.cap;
     const len = Math.sqrt(d2);
@@ -44,26 +49,39 @@ export class Tracks {
     const c = this.col, co = i * 16;
     for (let k = 0; k < 4; k++) { c[co + k * 4] = color.r; c[co + k * 4 + 1] = color.g; c[co + k * 4 + 2] = color.b; c[co + k * 4 + 3] = alpha; }
     this.birth[i] = this.time;
-    this.last.set(key, { x, y, z, nx, nz, t: this.time });
-    this.dirty = true;
+    prev.x = x; prev.y = y; prev.z = z; prev.nx = nx; prev.nz = nz; prev.t = this.time;
+    if (this.aLo >= 0 && i === this.aHi + 1) this.aHi = i;
+    else { this.flushAdds(); this.aLo = this.aHi = i; }
+  }
+  flushAdds() {
+    if (this.aLo < 0) return;
+    const n = this.aHi - this.aLo + 1;
+    markRange(this.geo.attributes.position, this.aLo * 12, n * 12);
+    markRange(this.geo.attributes.color, this.aLo * 16, n * 16);
+    this.aLo = this.aHi = -1;
   }
   update(dt) {
     this.time += dt;
-    // fade a slice each frame
-    const c = this.col;
-    for (let i = 0; i < this.cap; i++) {
+    this.flushAdds();
+    // fade one slice per frame; each segment is revisited every SLICES frames
+    const c = this.col, per = Math.ceil(this.cap / SLICES);
+    const s0 = this.slice * per, s1 = Math.min(this.cap, s0 + per);
+    this.slice = (this.slice + 1) % SLICES;
+    const fadeAt = this.life * 0.6, fadeLen = this.life * 0.4;
+    let lo = -1, hi = -1;
+    for (let i = s0; i < s1; i++) {
       const age = this.time - this.birth[i];
-      if (age > this.life * 0.6) {
-        const a = Math.max(0, 0.35 * (1 - (age - this.life * 0.6) / (this.life * 0.4)));
-        const co = i * 16;
-        if (c[co + 3] > a) { for (let k = 0; k < 4; k++) c[co + k * 4 + 3] = a; this.dirty = true; }
+      if (age <= fadeAt) continue;
+      const co = i * 16;
+      if (c[co + 3] <= 0) continue;
+      const a = Math.max(0, 0.35 * (1 - (age - fadeAt) / fadeLen));
+      if (c[co + 3] > a) {
+        for (let k = 0; k < 4; k++) c[co + k * 4 + 3] = a;
+        if (lo < 0) lo = i;
+        hi = i;
       }
     }
-    if (this.dirty) {
-      this.geo.attributes.position.needsUpdate = true;
-      this.geo.attributes.color.needsUpdate = true;
-      this.dirty = false;
-    }
+    if (lo >= 0) markRange(this.geo.attributes.color, lo * 16, (hi - lo + 1) * 16);
   }
   forget(key) { this.last.delete(key); }
 }

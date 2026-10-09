@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { carGeometry, weaponGeometry, wheelGeometry, vcMat } from './models.js';
 import { outlineGeometry, outlineMat } from './toon.js';
+import { markRange } from './perf.js';
 
 const _m = new THREE.Matrix4(), _rootM = new THREE.Matrix4(), _one = new THREE.Vector3(1, 1, 1), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
 const AXIS_X = new THREE.Vector3(1, 0, 0), AXIS_Y = new THREE.Vector3(0, 1, 0);
@@ -27,7 +28,7 @@ export class WheelPool {
   }
   end() {
     this.mesh.count = this.n; this.ol.count = this.n;
-    this.mesh.instanceMatrix.needsUpdate = true; this.ol.instanceMatrix.needsUpdate = true;
+    markRange(this.mesh.instanceMatrix, 0, this.n * 16); markRange(this.ol.instanceMatrix, 0, this.n * 16);
   }
 }
 
@@ -152,7 +153,7 @@ export class CarView {
       if (!this.flashMat) { this.flashMat = vcMat().clone(); this.flashMat.emissive = new THREE.Color(0xffffff); }
       this.flashMat.emissiveIntensity = car.hitFlash * 0.45;
       this.body.material = this.flashMat;
-    } else this.body.material = vcMat();
+    } else if (this.flashMat && this.body.material === this.flashMat) this.body.material = vcMat();
   }
 
   dispose() {

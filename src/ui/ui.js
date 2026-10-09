@@ -8,6 +8,8 @@ import { MENUS } from './menus.js';
 import { formatNum, clamp } from '../core/math.js';
 
 const _v = new THREE.Vector3();
+const MINI_HZ = 12; // minimap redraw rate
+const _miniNodes = [];
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 export class UI {
@@ -53,6 +55,7 @@ export class UI {
     this.mini = this.$('minimap');
     this.miniCtx = this.mini.getContext('2d');
     this.mapBg = null;
+    this.miniT = 0;
     this.stuntT = 0;
     this.bannerT = 0;
     this.tickerQueue = [];
@@ -248,7 +251,7 @@ export class UI {
     // banner fade
     if (this.bannerT > 0) { this.bannerT -= dt; if (this.bannerT <= 0) this.$('banner').classList.remove('show'); }
     this.updateMission();
-    this.updateMinimap(car);
+    this.updateMinimap(car, dt);
     this.updateLabels(car);
     this.updatePrompt(car);
   }
@@ -301,7 +304,9 @@ export class UI {
 
   worldToMap(x, z, size) { return [((x + HALF) / (HALF * 2)) * size, ((z + HALF) / (HALF * 2)) * size]; }
 
-  updateMinimap(car) {
+  updateMinimap(car, dt) {
+    // throttled: the whole map (incl. arrow/rotation) redraws ~MINI_HZ times a second
+    if (dt !== undefined) { this.miniT -= dt; if (this.miniT > 0) return; this.miniT = Math.max(0, this.miniT + 1 / MINI_HZ); }
     if (!this.mapBg) this.buildMapBg();
     const ctx = this.miniCtx, W = this.mini.width;
     const g = this.game, sim = this.sim;
@@ -327,19 +332,21 @@ export class UI {
       ctx.fillStyle = f?.color || '#888'; ctx.strokeStyle = '#2b1d14'; ctx.lineWidth = 2;
       ctx.fillRect(x - hs, z - hs, hs * 2, hs * 2); ctx.strokeRect(x - hs, z - hs, hs * 2, hs * 2);
     }
-    // pickups
-    for (const n of g.pickups.nodes) {
+    // pickups (grid pre-filter: only cells around the player)
+    const r2 = (W / 2) * (W / 2);
+    const nodes = g.pickups.nodesInBox ? g.pickups.nodesInBox(px, pz, R, _miniNodes) : g.pickups.nodes;
+    for (const n of nodes) {
       if (!n.active) continue;
-      const [x, z] = toMini(n.x, n.z);
-      if (x * x + z * z > (W / 2) * (W / 2)) continue;
+      const x = (n.x - px) * scale, z = (n.z - pz) * scale;
+      if (x * x + z * z > r2) continue;
       ctx.fillStyle = RES_INFO[n.res]?.color || '#fff';
       ctx.fillRect(x - 1.5, z - 1.5, 3, 3);
     }
     // cars
     for (const c of g.cars) {
       if (c === car || !c.alive || c.traffic) continue;
-      const [x, z] = toMini(c.body.pos.x, c.body.pos.z);
-      if (x * x + z * z > (W / 2) * (W / 2)) continue;
+      const x = (c.body.pos.x - px) * scale, z = (c.body.pos.z - pz) * scale;
+      if (x * x + z * z > r2) continue;
       const hostile = g.hostile(car, c);
       ctx.fillStyle = c.isRemotePlayer ? '#00e5ff' : hostile ? '#ff3b3b' : c.factionColor || '#9aa3ad';
       ctx.beginPath(); ctx.arc(x, z, c.vip ? 4.5 : 3.2, 0, Math.PI * 2); ctx.fill();

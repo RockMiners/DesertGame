@@ -1,8 +1,10 @@
 // Cartoon particle effects: puffy dust/smoke balls, fire, sparks, debris, beams, lightning, floating text.
 import * as THREE from 'three';
 import { gradientMap } from './toon.js';
+import { markRange } from './perf.js';
 
-const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color();
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color(), _c2 = new THREE.Color();
+const SPIN_AXIS = new THREE.Vector3(0.3, 1, 0.2).normalize(), FWD = new THREE.Vector3(0, 0, 1);
 
 class Pool {
   constructor(scene, geo, mat, cap) {
@@ -20,12 +22,13 @@ class Pool {
     return p;
   }
   update(dt, terrain) {
-    const out = [];
+    const parts = this.parts;
     let n = 0;
-    for (const p of this.parts) {
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
       p.age += dt;
       if (p.age >= p.life) continue;
-      out.push(p);
+      parts[n] = p; // compact in place (n <= i)
       const t = p.age / p.life;
       p.vx *= 1 - p.drag * dt; p.vy *= 1 - p.drag * dt; p.vz *= 1 - p.drag * dt;
       p.vy += p.grav * dt;
@@ -38,22 +41,22 @@ class Pool {
       const grow = p.grow ?? 1;
       const sc = p.size * (t < 0.25 ? 0.4 + (t / 0.25) * (grow - 0.4) : grow * (1 - (t - 0.25) / 0.75));
       p.rx += p.spin * dt;
-      _q.setFromAxisAngle(_v.set(0.3, 1, 0.2).normalize(), p.rx);
       if (p.stretch) {
         _s.set(sc * 0.35, sc * 0.35, sc * p.stretch);
-        _q.setFromUnitVectors(_v.set(0, 0, 1), _v.clone().set(p.vx, p.vy, p.vz).normalize());
-      } else _s.set(sc, sc, sc);
+        _q.setFromUnitVectors(FWD, _v2.set(p.vx, p.vy, p.vz).normalize());
+      } else { _q.setFromAxisAngle(SPIN_AXIS, p.rx); _s.set(sc, sc, sc); }
       _m.compose(_v.set(p.x, p.y, p.z), _q, _s);
       this.mesh.setMatrixAt(n, _m);
       _c.setRGB(p.r, p.g, p.b);
-      if (p.r2 !== undefined) _c.lerp(new THREE.Color(p.r2, p.g2, p.b2), t);
+      if (p.r2 !== undefined) _c.lerp(_c2.setRGB(p.r2, p.g2, p.b2), t);
       this.mesh.setColorAt(n, _c);
       n++;
     }
-    this.parts = out;
+    parts.length = n;
     this.mesh.count = n;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    // upload only the live instances
+    markRange(this.mesh.instanceMatrix, 0, n * 16);
+    if (this.mesh.instanceColor) markRange(this.mesh.instanceColor, 0, n * 3);
   }
 }
 
@@ -205,8 +208,8 @@ export class FX {
       n++;
     }
     this.beams.count = n;
-    this.beams.instanceMatrix.needsUpdate = true;
-    if (this.beams.instanceColor) this.beams.instanceColor.needsUpdate = true;
+    markRange(this.beams.instanceMatrix, 0, n * 16);
+    if (this.beams.instanceColor) markRange(this.beams.instanceColor, 0, n * 3);
     this.beamList.length = 0;
     // bolts: jagged segments
     let k = 0;
@@ -220,13 +223,14 @@ export class FX {
         const nx = b.from.x + (b.to.x - b.from.x) * t + (Math.random() - 0.5) * j;
         const ny = b.from.y + (b.to.y - b.from.y) * t + (Math.random() - 0.5) * j;
         const nz = b.from.z + (b.to.z - b.from.z) * t + (Math.random() - 0.5) * j;
-        this.boltPos.set([px, py, pz, nx, ny, nz], k * 3);
+        const bp = this.boltPos, o = k * 3;
+        bp[o] = px; bp[o + 1] = py; bp[o + 2] = pz; bp[o + 3] = nx; bp[o + 4] = ny; bp[o + 5] = nz;
         k += 2;
         px = nx; py = ny; pz = nz;
       }
     }
     this.boltGeo.setDrawRange(0, k);
-    this.boltGeo.attributes.position.needsUpdate = true;
+    markRange(this.boltGeo.attributes.position, 0, k * 3);
     this.shake = Math.max(0, this.shake - dt * 2.5);
     this.texts = this.texts.filter((t) => (t.age += dt) < t.life);
   }

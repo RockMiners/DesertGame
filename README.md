@@ -53,7 +53,7 @@ Rigs have bunks, so you can sleep anywhere. You can save designs and hand them t
 - **Factions** have leaders with personality traits: aggression, honour, greed, cunning, ambition, caution, zeal and paranoia. These drive every decision.
 - **Bases** sit on a tile grid. Production needs workers or powered Auto-Rigs. Every member needs a bed. Turrets defend, and terrain gives a defence bonus.
 - **Economy.** The Hub market prices follow supply and demand. Factions run supply convoys and trade caravans, and you can raid either. Faction trade posts sell cheap whatever that faction has too much of. When two factions produce the same thing and prices slide, greedy leaders go to war over the market.
-- **War.** Warbands march, besiege and raze bases. A zone with no bases left becomes claimable. Within about 500 m of a player, warbands, convoys and garrisons become real AI cars you can fight beside or against. Everywhere else, battles resolve abstractly and terrain matters there too.
+- **War.** Warbands march, besiege and raze bases. A zone with no bases left becomes claimable. Within about 400 m of a player, warbands and convoys become real AI cars driving in formation, and a base's garrison rolls out as one patrol when you come within about 260 m. Everywhere else they stay abstract (battles still resolve, and terrain still matters), so the open desert has room to breathe.
 - **Diplomacy.** Relations drift. Factions form alliances against shared enemies, sign truces when weary, demand tribute, and betray allies.
 
 **The Storyteller** paces events by tension and draws them "from a hat". Six premade story arcs run first:
@@ -74,7 +74,12 @@ Repeatable events follow: the Great Betrayal, coups, faction sunderings, defecti
 
 **Day and night, respawning, fuel and ammo.** Days last 12 real minutes. Your car has headlights, and night has stars and moonlight. You respawn where you last slept, or in the Hub if you have no base. Petrol and ammo run out, and you get stranded on fumes if you're careless.
 
-**Co-op, hosted by a player.** Press `Esc`, open Co-op and share the code. Friends join from the title screen with that code. They join your group and share your faction, wallet and world. The host's browser runs the simulation, and friends connect peer-to-peer over WebRTC (PeerJS). The public PeerJS broker is used only to introduce the browsers. No game server is involved. For testing on one machine, `?net=local` uses a BroadcastChannel transport between tabs.
+**Co-op, hosted by a player.** Press `Esc` → Co-op → *Open this game to friends*. Friends join your group and share your faction, wallet and world. The host's browser runs the whole simulation; there is no game server. There are two ways to play together:
+
+- **The hosted build (recommended).** The [Pages workflow](.github/workflows/pages.yml) publishes the game to `https://rockminers.github.io/DesertGame/` on every push (one-time setup: *Settings → Pages → Source: GitHub Actions*). The host copies their **invite link** from the Co-op tab, and friends just open it. Browsers connect peer-to-peer over WebRTC (PeerJS); the public PeerJS broker only introduces them.
+- **Inside the claude.ai artifact.** Artifacts can't open WebRTC connections, so co-op rides the artifact's `room` and `db` capabilities instead. The host must own (or be able to edit) the artifact. Friends open the same artifact link, press *Join a Friend*, and pick the host's game from the list. Everyone must be signed in to claude.ai and have the artifact shared with them. Updates are a little slower than a direct connection.
+
+How it stays smooth: friends receive compact snapshots of only the cars near them (base-36 packed, ~60 bytes per car, 20 Hz peer-to-peer or 12 Hz in the artifact) and replay them about 0.1–0.2 s in the past with Hermite interpolation and a steered playback clock, so jitter and lost packets don't show. The slow world state (factions, bases, missions, chronicle) is split into sections that are re-sent only when they change. Damage is decided on the machine that owns the shooter. For testing on one machine, `?net=local` connects tabs through a BroadcastChannel.
 
 ## Code layout
 
@@ -94,7 +99,9 @@ src/
   sim/              strategic sim: factions, economy, strategy AI, storyteller,
                     chronicle, missions, player commands, lore
   ui/               HUD, menus, garage designer, base builder, portraits
-  net/net.js        WebRTC co-op (host-authoritative)
+  net/net.js        co-op: host-authoritative snapshots, interpolation, damage routing
+  net/protocol.js   wire format: packed car records, world-state sections
+  net/transports.js PeerJS (WebRTC), BroadcastChannel, and the artifact room + db
 test/               headless sim tests (20 simulated days, faction founding)
 ```
 
@@ -103,5 +110,6 @@ test/               headless sim tests (20 simulated days, faction founding)
 - Desktop only. There are no touch controls.
 - The world is one 3 km map. Content is procedural, but the map doesn't grow.
 - In co-op, the host's world is authoritative and the game never pauses while friends are connected. Pickups are per-player, so two players can both grab the same pile. Beams and tesla arcs are only drawn on the shooter's screen.
-- PeerJS needs its public broker to be reachable to set up a connection. Some corporate networks or embedded pages block it.
+- PeerJS needs its public broker to be reachable to set up a connection. Some corporate networks block it; very strict NATs may also need a TURN relay.
+- The host should keep the game tab open. A background tab keeps simulating (a worker timer drives it), but browsers may still slow it down after a while.
 - Balance is a first pass. The Iron Dominion tends to snowball if nobody stops it, which is arguably the point.

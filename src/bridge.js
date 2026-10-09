@@ -1,10 +1,16 @@
 // Bridge between the strategic sim and the physical world: squads and garrisons near a player
 // become real cars; deaths, arrivals and structure damage flow back into the sim.
 import * as THREE from 'three';
-import { PHYS_R, PHYS_R_OUT, TILE, STRUCTS } from './sim/defs.js';
+import { PHYS_R, PHYS_R_OUT, GUARD_R, GUARD_R_OUT, TILE, STRUCTS } from './sim/defs.js';
 import { combatValue } from './sim/sim.js';
 import { NODE_TYPES } from './world/worldgen.js';
 import { HUB_SAFE_R } from './sim/constants.js';
+import { CHASSIS } from './vehicle/parts.js';
+import { formationSlots, slotOffset } from './ai/driver.js';
+
+const sizeOf = (n) => CHASSIS[n.design?.chassis]?.size ?? 1;
+// convoys and caravans ride nose to tail; fighting groups ride in a wedge
+const shapeOf = (sq) => (sq.task.type === 'convoy' || sq.task.type === 'trade' ? 'column' : 'wedge');
 
 export class Bridge {
   constructor(game, sim) {
@@ -77,14 +83,23 @@ export class Bridge {
       if (!sq.physical && (d < PHYS_R || escort)) this.materialize(sq);
       else if (sq.physical && d > PHYS_R_OUT && !escort) this.dematerialize(sq);
     }
-    // garrisons
+    // garrisons: guard cars only roll out when a player is close, or further out if a battle is on at the gates
     for (const b of Object.values(sim.s.bases)) {
       const d = this.nearestPlayerDist(b.x, b.z);
       const active = this.guardBases.get(b.id);
-      if (d < PHYS_R * 0.85 && !active) this.spawnGuards(b);
-      else if (active && d > PHYS_R_OUT * 0.9) this.despawnGuards(b);
+      const battle = !!sim.s.squads[b.siegedBy]?.physical;
+      if (!active && d < (battle ? PHYS_R * 0.85 : GUARD_R)) this.spawnGuards(b);
+      else if (active && d > (battle ? PHYS_R_OUT * 0.9 : GUARD_R_OUT)) this.despawnGuards(b);
       b.physical = d < PHYS_R * 0.85;
-      if (active && b.alarm > 0) for (const id of active) { const c = this.npcCars.get(id); if (c?.ai) c.ai.aggro = 240; }
+      const set = this.guardBases.get(b.id);
+      if (set?.size) {
+        // a guard called up into a squad now rides with that squad
+        for (const id of set) if (sim.s.npcs[id]?.squadId) { const c = this.npcCars.get(id); if (c) { c.guard = false; c.guardBase = null; } set.delete(id); }
+        // break formation to defend when the base is hit; re-form (or pick a new patrol leader) otherwise
+        const alarmed = b.alarm > 0;
+        const leadOk = set.lead?.alive && set.has(set.lead.npcId);
+        if (alarmed !== set.alarmed || (!alarmed && !leadOk)) { set.alarmed = alarmed; this.assignGuardOrders(b, set); }
+      }
     }
     // clean up wrecks and stray cars
     for (const c of [...g.cars]) {
@@ -140,15 +155,16 @@ export class Bridge {
     if (!members.length) return;
     sq.physical = true;
     let heading = Math.atan2(sq.tx - sq.x, sq.tz - sq.z);
-    let x0 = sq.x, z0 = sq.z;
-    if (sq.task.type === 'escort') {
-      const p = this.game.player?.car;
-      if (p) { x0 = p.body.pos.x - p.body.fwd.x * 25; z0 = p.body.pos.z - p.body.fwd.z * 25; heading = p.body.heading(); }
-    }
+    let x0 = sq.x, z0 = sq.z, slots;
+    const p = sq.task.type === 'escort' ? this.game.player?.car : null;
+    if (p) {
+      // escorts fall in behind the player
+      x0 = p.body.pos.x; z0 = p.body.pos.z; heading = p.body.heading();
+      slots = formationSlots([p.stats.size, ...members.map(sizeOf)], 'wedge', 5).slice(1);
+    } else slots = formationSlots(members.map(sizeOf), shapeOf(sq));
+    // appear already in formation
     members.forEach((n, i) => {
-      const row = Math.floor(i / 2), side = i % 2 ? 1 : -1;
-      const ox = Math.cos(heading) * side * (i ? 7 : 0) - Math.sin(heading) * row * 12;
-      const oz = -Math.sin(heading) * side * (i ? 7 : 0) - Math.cos(heading) * row * 12;
+      const [ox, oz] = slotOffset(heading, slots[i]);
       this.spawnNpcCar(n, x0 + ox, z0 + oz, heading, { squadId: sq.id });
     });
     this.assignOrders(sq);
@@ -172,8 +188,9 @@ export class Bridge {
     const lead = cars[0];
     let order;
     const playerCar = this.game.player?.car;
+    const escort = t.type === 'escort' && playerCar;
     if (sq.wait > 0) order = { type: 'idle' };
-    else if (t.type === 'escort' && playerCar) order = { type: 'follow', leader: playerCar, offset: [0, -14], aggro: 160 };
+    else if (escort) order = { type: 'follow', leader: playerCar, aggro: 160 };
     else if (sq.state === 'returning' || sq.retreating) order = { type: 'goto', x: sq.tx, z: sq.tz, speed: 0.85, noFlee: true, aggro: 60 };
     else if ((t.type === 'attack' || t.type === 'raidBase') && sim.s.bases[t.targetBaseId]) {
       const b = sim.s.bases[t.targetBaseId];
@@ -189,11 +206,23 @@ export class Bridge {
       // convoys and caravans should not drive into the Hub walls
       if (t.type === 'trade' && Math.hypot(sq.tx, sq.tz) < HUB_SAFE_R + 10) { const a = Math.atan2(lead.body.pos.z, lead.body.pos.x); order.x = Math.cos(a) * 215; order.z = Math.sin(a) * 215; }
     }
-    cars.forEach((c, i) => {
-      if (!c.ai) return;
-      if (i === 0 || order.type !== 'goto') c.ai.setOrder({ ...order });
-      else c.ai.setOrder({ type: 'follow', leader: lead, offset: [(i % 2 ? 1 : -1) * 6, -10 * Math.ceil(i / 2)], aggro: order.aggro });
-    });
+    if (order.type === 'goto' && cars.length > 1) {
+      // the group moves at the pace of its slowest car and eases off while anyone is out of formation
+      const slowest = Math.min(...cars.map((c) => c.stats.topSpeed));
+      order.speed = Math.min(order.speed ?? 1, (0.85 * slowest) / Math.max(1, lead.stats.topSpeed));
+      if (cars.some((c, i) => i && c.ai && !c.ai.target?.alive && c.ai.slotDist > 45)) order.speed *= 0.4;
+    }
+    if (escort) {
+      const slots = formationSlots([playerCar.stats.size, ...cars.map((c) => c.stats.size)], 'wedge', 5);
+      cars.forEach((c, i) => c.ai?.setOrder({ ...order, offset: slots[i + 1] }));
+    } else {
+      const slots = formationSlots(cars.map((c) => c.stats.size), shapeOf(sq));
+      cars.forEach((c, i) => {
+        if (!c.ai) return;
+        if (i === 0 || order.type !== 'goto') c.ai.setOrder({ ...order });
+        else c.ai.setOrder({ type: 'follow', leader: lead, offset: slots[i], aggro: order.aggro });
+      });
+    }
     sq._orderType = order.type;
   }
 
@@ -230,8 +259,9 @@ export class Bridge {
       return;
     }
     if (t.type === 'escort' || t.type === 'hunt') return;
-    if (d < (t.type === 'convoy' || t.type === 'trade' || t.type === 'reinforce' ? 45 : 30)) {
-      if (t.type === 'trade' && Math.hypot(sq.x, sq.z) > HUB_SAFE_R + 40) return;
+    // caravans sell once they reach the Hub walls (they are steered to the gate, not the centre)
+    const there = t.type === 'trade' ? Math.hypot(sq.x, sq.z) < HUB_SAFE_R + 40 : d < (t.type === 'convoy' || t.type === 'reinforce' ? 45 : 30);
+    if (there) {
       sim.squadArrived(sq);
       if (sim.s.squads[sq.id]) this.assignOrders(sq);
     }
@@ -241,16 +271,45 @@ export class Bridge {
     const sim = this.sim;
     const set = new Set();
     this.guardBases.set(b.id, set);
-    // leaders only ride out to defend their own capital (a boss fight worth remembering)
-    const gar = sim.garrison(b).filter((n) => n.role !== 'leader' || b.capital).sort((a, c) => (c.role === 'leader') - (a.role === 'leader')).slice(0, Math.min(6, 2 + b.level));
-    const r = (b.size * TILE) / 2 + 12;
+    // leaders only ride out to defend their own capital (a boss fight worth remembering), at the head of the patrol
+    const gar = sim.garrison(b).filter((n) => n.role !== 'leader' || b.capital).sort((a, c) => (c.role === 'leader') - (a.role === 'leader')).slice(0, Math.min(3, 1 + b.level));
+    if (!gar.length) return;
+    // roll out in formation on the far side of the compound from the nearest player
+    let pd = Infinity, pa = 0;
+    for (const c of this.playerCars()) { const d = Math.hypot(c.body.pos.x - b.x, c.body.pos.z - b.z); if (d < pd) { pd = d; pa = Math.atan2(c.body.pos.z - b.z, c.body.pos.x - b.x); } }
+    const a = pa + Math.PI, r = (b.size * TILE) / 2 + 16;
+    const h = Math.atan2(-Math.sin(a), Math.cos(a)); // tangent, counter-clockwise like the patrol loop
+    const slots = formationSlots(gar.map(sizeOf), 'wedge');
     gar.forEach((n, i) => {
-      const a = (i / gar.length) * Math.PI * 2;
-      const car = this.spawnNpcCar(n, b.x + Math.cos(a) * r, b.z + Math.sin(a) * r, a + Math.PI / 2, { guard: true, order: { type: 'guard', x: b.x, z: b.z, r: r + 8 }, aggro: 130 });
+      const [ox, oz] = slotOffset(h, slots[i]);
+      const car = this.spawnNpcCar(n, b.x + Math.cos(a) * r + ox, b.z + Math.sin(a) * r + oz, h, { guard: true, aggro: 130 });
       car.guard = true;
       car.guardBase = b.id;
       set.add(n.id);
     });
+    set.alarmed = b.alarm > 0;
+    this.assignGuardOrders(b, set);
+  }
+
+  // Guards patrol as one group: the first drives a slow loop round the compound, the rest hold formation on it.
+  // Under attack they scatter and defend the base on their own.
+  assignGuardOrders(b, set) {
+    const cars = [...set].map((id) => this.npcCars.get(id)).filter((c) => c?.alive && c.ai);
+    const lead = cars[0];
+    set.lead = lead || null;
+    if (!lead) return;
+    const r = (b.size * TILE) / 2 + 16;
+    if (set.alarmed) {
+      for (const c of cars) { c.ai.aggro = 240; c.ai.setOrder({ type: 'guard', x: b.x, z: b.z, r: r + 4 }); }
+      return;
+    }
+    const a0 = Math.atan2(lead.body.pos.z - b.z, lead.body.pos.x - b.x);
+    const points = [];
+    for (let k = 1; k <= 8; k++) { const a = a0 + (k / 8) * Math.PI * 2; points.push([b.x + Math.cos(a) * r, b.z + Math.sin(a) * r]); }
+    lead.ai.aggro = 130;
+    lead.ai.setOrder({ type: 'patrol', points, i: 0, x: points[0][0], z: points[0][1], speed: 0.28, radius: 12 });
+    const slots = formationSlots(cars.map((c) => c.stats.size), 'wedge');
+    cars.forEach((c, i) => { if (i) { c.ai.aggro = 130; c.ai.setOrder({ type: 'follow', leader: lead, offset: slots[i] }); } });
   }
 
   despawnGuards(b) {
@@ -277,18 +336,21 @@ export class Bridge {
     const byGroup = !!(killer && (killer.isPlayer || killer.isRemotePlayer));
     if (n) sim.killNpc(n, { team: killer?.team, byGroup, car: true });
     if (car.guardBase) this.guardBases.get(car.guardBase)?.delete(car.npcId);
-    if (byGroup) g.emit('playerKill', car, n);
+    if (byGroup) g.emit('playerKill', car, n, killer);
   }
 
-  // Ambient Hub traffic: harmless locals pottering between the gates
+  // Ambient Hub traffic: a few harmless locals pottering about inside the walls
   updateTraffic() {
     const g = this.game;
     const pc = g.player?.car;
     if (!pc) return;
-    const near = Math.hypot(pc.body.pos.x, pc.body.pos.z) < 520;
+    const near = Math.hypot(pc.body.pos.x, pc.body.pos.z) < PHYS_R;
     this.traffic = this.traffic.filter((c) => !c.removed);
     if (!near) { for (const c of this.traffic) g.removeCar(c); this.traffic = []; return; }
-    while (this.traffic.length < 5) {
+    // a local that wandered out of town and out of sight goes home for good
+    for (const c of this.traffic) if (Math.hypot(c.body.pos.x, c.body.pos.z) > 230 && c.body.pos.distanceTo(pc.body.pos) > 150) g.removeCar(c);
+    this.traffic = this.traffic.filter((c) => !c.removed);
+    while (this.traffic.length < 3) {
       const a = Math.random() * Math.PI * 2;
       const colors = ['#ef476f', '#06d6a0', '#118ab2', '#ffd166', '#8338ec', '#fb5607'];
       const ch = ['buggy', 'coupe', 'pickup', 'van'][Math.floor(Math.random() * 4)];
@@ -303,10 +365,12 @@ export class Bridge {
     }
     for (const c of this.traffic) {
       if (!c.ai) continue;
-      if (c.ai.arrived || c.ai.order.type === 'idle' || Math.random() < 0.01) {
-        const a = Math.random() * Math.PI * 2, r = 50 + Math.random() * 110;
+      const out = Math.hypot(c.body.pos.x, c.body.pos.z) > 170;
+      if (out ? !c.ai.order.home : c.ai.arrived || c.ai.order.type === 'idle' || Math.random() < 0.01) {
+        // destinations stay well inside the wall ring; strays are turned back toward the middle
+        const a = out ? Math.atan2(c.body.pos.z, c.body.pos.x) : Math.random() * Math.PI * 2, r = out ? 90 : 50 + Math.random() * 100;
         c.ai.arrived = false;
-        c.ai.setOrder({ type: 'goto', x: Math.cos(a) * r, z: Math.sin(a) * r, speed: 0.35, aggro: 0 });
+        c.ai.setOrder({ type: 'goto', x: Math.cos(a) * r, z: Math.sin(a) * r, speed: 0.35, aggro: 0, home: out });
       }
     }
   }

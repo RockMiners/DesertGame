@@ -6,7 +6,7 @@ import { BIOMES, SURFACE_WHEEL } from '../world/biomes.js';
 const G = 9.81;
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _r = new THREE.Vector3(), _f = new THREE.Vector3();
 const _s = new THREE.Vector3(), _n = new THREE.Vector3(), _a = new THREE.Vector3(), _t = new THREE.Vector3();
-const _q = new THREE.Quaternion(), _qi = new THREE.Quaternion(), _pv = new THREE.Vector3();
+const _q = new THREE.Quaternion(), _qi = new THREE.Quaternion(), _pv = new THREE.Vector3(), _va = new THREE.Vector3(), _vb = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const nrm = { x: 0, y: 1, z: 0 };
 
@@ -132,9 +132,10 @@ export class VehicleBody {
   speed() { return this.vel.length(); }
   forwardSpeed() { return this.vel.dot(this.fwd); }
 
-  step(dt, terrain, mods) {
+  // substeps: 2 for full fidelity; distant cars can run 1 (physics LOD)
+  step(dt, terrain, mods, substeps = 2) {
     this.events.length = 0;
-    const sub = 2;
+    const sub = substeps > 0 ? substeps : 2;
     const h = dt / sub;
     for (let i = 0; i < sub; i++) this.substep(h, terrain, mods);
   }
@@ -382,8 +383,8 @@ export function collideBodies(A, B, out) {
   if (d < 1e-4) _n.set(1, 0, 0); else _n.divideScalar(d);
   _n.y *= 0.3; _n.normalize();
   _a.copy(sb.world).addScaledVector(_n, sb.r); // contact point approx
-  const va = A.pointVelocity(_a, new THREE.Vector3());
-  const vb = B.pointVelocity(_a, new THREE.Vector3());
+  const va = A.pointVelocity(_a, _va);
+  const vb = B.pointVelocity(_a, _vb);
   const rel = va.sub(vb).dot(_n);
   const totalInv = A.invMass + B.invMass;
   // positional correction
