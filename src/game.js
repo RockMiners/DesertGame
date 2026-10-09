@@ -316,7 +316,7 @@ export class Game {
       // burning & liquids
       if (car.burn > 0) {
         car.burn -= dt;
-        this.applyDamage(car, 6 * dt, car.burnBy, { kind: 'fire', quiet: true });
+        this.applyDamage(car, 6 * dt, car.burnBy, { kind: 'fire', quiet: true, fromNet: !!car.burnBy?.isRemote });
         if (Math.random() < 0.5) this.fx.fire(car.body.pos.x, car.body.pos.y + 1, car.body.pos.z, 1);
       }
       const L = car.body.inLiquid;
@@ -398,6 +398,7 @@ export class Game {
       }
       if (steps === 5) this.acc = 0;
       this.combat.update(dt);
+      this.structures?.tick(dt);
       this.pickups.update(dt, this.cars, this.focusPos());
       this.postUpdate?.(dt);
     }
@@ -418,8 +419,11 @@ export class Game {
       const vis = d < this.viewDist;
       car.view.setVisible(vis);
       if (!vis) continue;
-      _v.lerpVectors(car.prevPos, car.body.pos, alpha);
-      _q.copy(car.prevQuat).slerp(car.body.quat, alpha);
+      // co-op replicas are drawn straight from their snapshot timeline at this frame's time
+      if (!(car.isRemote && this.net?.renderPose(car, _v, _q))) {
+        _v.lerpVectors(car.prevPos, car.body.pos, alpha);
+        _q.copy(car.prevQuat).slerp(car.body.quat, alpha);
+      }
       car.view.update(dt, this.wheels, night, _v, _q);
       if (!this.paused) this.carFx(car, dt, d);
     }

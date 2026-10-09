@@ -68,11 +68,14 @@ export function buildSection(sim, key) {
   const s = sim.s;
   switch (key) {
     case 'core': {
-      const { time, factions, bases, squads, npcs, chronicle, missions, ...rest } = s;
-      void time; void factions; void bases; void squads; void npcs; void chronicle;
+      // story pacing drifts every tick and only matters to the host; player positions ride the snapshots
+      const { time, factions, bases, squads, npcs, chronicle, missions, story, players, ...rest } = s;
+      void time; void factions; void bases; void squads; void npcs; void chronicle; void story;
       const { waypoint, ...shared } = missions; // the host's personal map marker stays theirs
       void waypoint;
-      return { ...rest, missions: shared };
+      const ps = {};
+      for (const [id, p] of Object.entries(players || {})) ps[id] = { id, name: p.name, sleepBase: p.sleepBase };
+      return { ...rest, missions: shared, players: ps };
     }
     case 'factions': {
       const out = {};
@@ -143,16 +146,28 @@ export function applySection(sim, key, data) {
 // ---- snapshot interpolation for replicas (remote players and, on clients, every NPC) ----
 export function pushSample(car, t, d) {
   const buf = (car.netBuf ||= []);
-  if (buf.length && t <= buf[buf.length - 1].t) return;
+  const last = buf[buf.length - 1];
+  if (last && t <= last.t) return;
+  // a respawn or teleport: start a fresh timeline so the replica snaps instead of flying across the map
+  if (last) {
+    const dt = (t - last.t) / 1000, dx = d.p[0] - last.p.x, dz = d.p[2] - last.p.z;
+    if (Math.hypot(dx, dz) > 30 + (last.v.length() + 20) * dt * 2) buf.length = 0;
+  }
   buf.push({ t, p: new THREE.Vector3(d.p[0], d.p[1], d.p[2]), q: new THREE.Quaternion(d.q[0], d.q[1], d.q[2], d.q[3]).normalize(), v: new THREE.Vector3(d.v[0], d.v[1], d.v[2]) });
   if (buf.length > 8) buf.shift();
 }
 
 // Place car at remote clock time `rt` (interpolating, or extrapolating up to 250 ms past the newest sample)
 export function sampleAt(car, rt) {
+  const b = car.body;
+  return samplePose(car, rt, b.pos, b.quat, b.vel);
+}
+
+// The pose at remote time `rt`, written into the given vectors (the renderer uses this every frame)
+export function samplePose(car, rt, pos, quat, vel) {
   const buf = car.netBuf;
   if (!buf || !buf.length) return false;
-  const b = car.body;
+  const b = { pos, quat, vel };
   let i = buf.length - 1;
   while (i > 0 && buf[i - 1].t > rt) i--;
   const hi = buf[i], lo = buf[i - 1];

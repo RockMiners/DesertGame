@@ -2,7 +2,7 @@
 // near them (interpolated ~100-180 ms in the past so motion is smooth), the slow world state in sections that
 // are re-sent only when they change, and they send back their own car, the damage they deal and their commands.
 import * as THREE from 'three';
-import { packCar, unpackCar, packFast, unpackFast, packSquads, carMeta, SECTIONS, buildSection, applySection, pushSample, sampleAt, FLAG } from './protocol.js';
+import { packCar, unpackCar, packFast, unpackFast, packSquads, carMeta, SECTIONS, buildSection, applySection, pushSample, sampleAt, samplePose, FLAG } from './protocol.js';
 import { PeerTransport, LocalTransport, RoomTransport, artifactCaps } from './transports.js';
 import { DEFAULT_DESIGN } from '../vehicle/parts.js';
 import { dayOf } from '../sim/defs.js';
@@ -116,12 +116,18 @@ export class Net {
 
   onPeerJoin(pid, name) {
     if (this.peers.has(pid)) return;
-    this.peers.set(pid, { name: name || 'Friend', car: null, known: new Set(), clock: new Clock(), meta: null, hurt: [] });
+    this.peers.set(pid, { name: name || 'Friend', car: null, known: new Set(), clock: new Clock(), meta: null, hurt: [], done: new Map() });
     this.t.send(pid, { t: 'welcome', you: pid, seed: this.sim.s.seed, hostName: this.sim.s.group.leaderName, time: this.sim.s.time });
     if (!this.t.sectionsViaDb) for (const k of SECTIONS) if (this.secJson[k]) this.t.send(pid, { t: 'sec', k, d: this.secJson[k] });
-    this.app.ui?.toast(`🚗 ${name || 'A friend'} joined your group!`, 'good');
-    this.sim.chronicle('player', { title: `${name || 'A friend'} Joins the Crew`, text: `${name || 'Another driver'} rolled in from the dunes and threw in their lot with ${this.sim.s.group.leaderName || 'the stranger'}.`, importance: 1 });
     this.t.advertise(this.info());
+  }
+
+  // announced when their car first rolls in (a friend who has to regenerate their world reconnects first)
+  announceArrival(p) {
+    if (p.announced) return;
+    p.announced = true;
+    this.app.ui?.toast(`🚗 ${p.name} joined your group!`, 'good');
+    this.sim.chronicle('player', { title: `${p.name} Joins the Crew`, text: `${p.name} rolled in from the dunes and threw in their lot with ${this.sim.s.group.leaderName || 'the stranger'}.`, importance: 1 });
   }
 
   onPeerLeave(pid) {
@@ -151,7 +157,7 @@ export class Net {
       p.car.isRemotePlayer = true;
       p.car.title = `🎮 ${p.name}`;
       p.car.netClock = p.clock;
-      p.designRef = p.meta?.design || null;
+      this.announceArrival(p);
     }
     p.clock.see(t);
     pushSample(p.car, t, r);
@@ -175,9 +181,14 @@ export class Net {
         break;
       }
       case 'cmd': {
-        let res;
-        try { res = this.sim.cmd(String(m.n), m.a || {}, pid); } catch (e) { res = { ok: false, msg: String(e.message || e) }; }
-        this.t.send(pid, { t: 'res', id: m.id, r: safe(res) });
+        // a resent request (its answer was lost) gets the same answer, never a second purchase
+        let res = p.done.get(m.id);
+        if (res === undefined) {
+          try { res = safe(this.sim.cmd(String(m.n), m.a || {}, pid)); } catch (e) { res = { ok: false, msg: String(e.message || e) }; }
+          p.done.set(m.id, res);
+          if (p.done.size > 64) p.done.delete(p.done.keys().next().value);
+        }
+        this.t.send(pid, { t: 'res', id: m.id, r: res });
         this.secT = Math.min(this.secT, 0.2); // let the friend see the result (wallet, missions…) right away
         break;
       }
@@ -330,7 +341,11 @@ export class Net {
       };
       this.t.onSection = (k, json) => { sections[k] = json; done(); };
       this.t.onMsg = (m) => {
-        if (m.t === 'welcome' && !welcome) { welcome = m; this.myPid = m.you; this.gtBase = num(m.time); this.gtAt = performance.now(); done(); return; }
+        if (m.t === 'welcome' && !welcome) {
+          welcome = m; this.myPid = m.you;
+          if (m.time !== undefined) { this.gtBase = num(m.time); this.gtAt = performance.now(); }
+          done(); return;
+        }
         if (m.t === 'sec' && !this.ready) { if (SECTIONS.includes(m.k) && typeof m.d === 'string') { sections[m.k] = m.d; done(); } return; }
         if (this.ready) this.onClientMsg(m);
       };
@@ -339,7 +354,7 @@ export class Net {
         if (!this.ready) { clearTimeout(timer); reject(new Error(why === 'nodb' ? 'This game cannot share its world here.' : 'The host closed the game.')); return; }
         this.app.onHostLost();
       };
-      this.t.join(this.code, name).then((info) => {
+      this.t.join(this.code, name, this.app.seed).then((info) => {
         // the artifact room tells us the host's seed before the welcome: reboot early if the worlds differ
         if (info?.seed !== undefined && info.seed !== this.app.seed) { clearTimeout(timer); resolve({ seed: info.seed, hostName: info.hostName, early: true }); }
       }).catch((e) => { clearTimeout(timer); reject(e); });
@@ -365,7 +380,14 @@ export class Net {
       case 'sec': if (SECTIONS.includes(m.k) && typeof m.d === 'string') this.onSection(m.k, m.d); break;
       case 'meta': if (Array.isArray(m.l)) for (const meta of m.l) this.onMeta(meta); break;
       case 'res': { const r = this.pending.get(m.id); if (r) { this.pending.delete(m.id); r(m.r); } break; }
-      case 'ev': this.app.onSimEvent(m.e, m.d); break;
+      case 'ev': {
+        // chronicle entries show up in the journal now rather than with the next world-state section
+        const c = Array.isArray(m.d) ? m.d[0] : null;
+        const chron = this.sim.s?.chronicle;
+        if (m.e === 'chronicle' && c?.id && chron && !chron.some((x) => x.id === c.id)) chron.push(c);
+        this.app.onSimEvent(m.e, m.d);
+        break;
+      }
       case 'hurt': {
         const car = this.game.player?.car;
         if (!car || !Array.isArray(m.h)) return;
@@ -464,15 +486,16 @@ export class Net {
     this.metaT -= dt;
     if (this.metaT <= 0 && pc) {
       this.metaT = 1;
-      if (pc.design !== this.sentDesign || this.app.playerName !== this.sentName) {
-        this.sentDesign = pc.design; this.sentName = this.app.playerName;
+      // also re-sent now and then, in case the host lost us for a while and forgot our car
+      if (pc.design !== this.sentDesign || this.app.playerName !== this.sentName || now - (this.metaAt || 0) > 15000) {
+        this.sentDesign = pc.design; this.sentName = this.app.playerName; this.metaAt = now;
         this.t.send({ t: 'meta', name: this.app.playerName, design: pc.design });
       }
     }
     this.flushT -= dt;
     if (this.flushT <= 0) {
       this.flushT = this.kind === 'room' ? 0.2 : 0.1;
-      if (this.dmgAcc.size) { this.t.send({ t: 'dmg', h: [...this.dmgAcc].map(([nid, [a, k]]) => [nid, Math.round(a * 10) / 10, k]) }); this.dmgAcc.clear(); }
+      if (this.dmgAcc.size) { this.t.send({ t: 'dmg', h: [...this.dmgAcc.values()].map(([nid, a, k]) => [nid, Math.round(a * 10) / 10, k]) }); this.dmgAcc.clear(); }
       if (this.sdAcc.size) { this.t.send({ t: 'sd', h: [...this.sdAcc.values()].map(([b, st, a, team]) => [b, st, Math.round(a * 10) / 10, team]) }); this.sdAcc.clear(); }
       if (this.needMeta.size && now - (this.nmAt || 0) > 600) { this.nmAt = now; this.t.send({ t: 'nm', l: [...this.needMeta].slice(0, 32) }); }
     }
@@ -517,14 +540,23 @@ export class Net {
     }
   }
 
+  // the renderer asks for a replica's pose at this frame's time, so motion is smooth at any refresh rate
+  renderPose(car, pos, quat) {
+    if (!car.netBuf) return false;
+    const clock = car.netClock || this.hostClock;
+    return samplePose(car, clock.now(performance.now()), pos, quat, _vel);
+  }
+
   // all damage is decided where the shooter lives; replicas only forward it
   sendDamage(target, amount, source, opts) {
     if (opts.fromNet) return;
     if (this.isClient) {
       if (!source?.isPlayer || !target.netNid) return;
-      const acc = this.dmgAcc.get(target.netNid) || [0, opts.kind || 'bullet'];
-      acc[0] += amount;
-      this.dmgAcc.set(target.netNid, acc);
+      // keyed by damage type too: explosive resistance applies per kind on the host
+      const key = `${target.netNid}|${opts.kind || 'bullet'}`;
+      const acc = this.dmgAcc.get(key) || [target.netNid, 0, opts.kind || 'bullet'];
+      acc[1] += amount;
+      this.dmgAcc.set(key, acc);
       return;
     }
     for (const p of this.peers.values()) {
@@ -548,10 +580,19 @@ export class Net {
 
   request(name, args) {
     const id = this.reqId++;
+    const msg = { t: 'cmd', id, n: name, a: safe(args) };
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      this.t.send({ t: 'cmd', id, n: name, a: safe(args) });
-      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); resolve({ ok: false, msg: 'The host did not answer.' }); } }, 10000);
+      this.t.send(msg);
+      // answers can be lost on the artifact room; the host de-duplicates by id, so asking again is safe
+      let tries = 0;
+      const timer = setInterval(() => {
+        if (!this.pending.has(id)) { clearInterval(timer); return; }
+        if (++tries <= 3) { this.t.send(msg); return; }
+        clearInterval(timer);
+        this.pending.delete(id);
+        resolve({ ok: false, msg: 'The host did not answer.' });
+      }, 3500);
     });
   }
 
@@ -574,13 +615,13 @@ export class Net {
     const list = [...this.peers.values()].map((p) => `<li>🚗 ${esc(p.name)}</li>`).join('');
     const link = this.inviteLink();
     const how = this.kind === 'room'
-      ? '<p>Friends open this same artifact link and pick your game under <b>Join a Friend</b>. They need to be signed in to claude.ai and have access to the artifact (share it with them).</p>'
-      : `<p>Send friends this link — it drops them straight into your game:</p><div class="invite"><input readonly value="${esc(link)}" onclick="this.select()"/><button data-action="copyInvite">Copy link</button></div><p class="muted small">Or they press <b>Join a Friend</b> and type the code.</p>`;
+      ? '<p>Friends open this same artifact and pick your game under <b>Join a Friend</b>. Share it with them by email from the artifact\'s Share menu: they must be signed in to claude.ai, and visitors on a public link can\'t join co-op.</p>'
+      : `<p>Send friends this link. It opens the game with your code filled in; they pick a name and press Join:</p><div class="invite"><input readonly value="${esc(link)}" onclick="this.select()"/><button data-action="copyInvite">Copy link</button></div><p class="muted small">Or they press <b>Join a Friend</b> and type the code.</p>`;
     return `<div class="center-msg"><h3>Co-op is open</h3><div class="bigcode">${esc(this.code)}</div>${how}<h4>In your group</h4><ul>${list || '<li class="muted">Nobody yet</li>'}</ul><p class="muted small">${this.kind === 'room' ? 'Runs through claude.ai: no setup, but updates are a little slower than a direct connection.' : 'Peer-to-peer: your browser runs the world and friends connect straight to you.'} Keep this tab open while friends play.</p></div>`;
   }
 
   close() { this.t?.close(); }
 }
 
+const _vel = new THREE.Vector3();
 function safe(v) { try { return v === undefined ? null : JSON.parse(JSON.stringify(v)); } catch { return null; } }
-void THREE;

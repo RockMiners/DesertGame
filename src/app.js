@@ -82,6 +82,8 @@ export class App {
   initCoop() {
     this.canHost = true;
     this.coopReady = Promise.resolve(true);
+    // keep the world running for friends while the host's tab is in the background
+    document.addEventListener('visibilitychange', () => this.onVisibility());
     if (NET_KIND !== 'room') return;
     this.canHost = null; // unknown until the artifact answers
     this.coopReady = artifactCaps().then(async (caps) => {
@@ -90,8 +92,6 @@ export class App {
       try { this.canHost = caps.user ? await caps.user.canEdit() : null; } catch { this.canHost = null; }
       return true;
     });
-    // keep the world running for friends while the host's tab is in the background
-    document.addEventListener('visibilitychange', () => this.onVisibility());
   }
 
   showLoading(msg, p) {
@@ -169,6 +169,7 @@ export class App {
     this.stopLobby = watchLobby(this.caps.room, (games) => {
       const box = el();
       if (!box) { this.stopLobby?.(); this.stopLobby = null; return; }
+      if (!games) { box.innerHTML = '<p class="warn">This view can\'t use co-op. Sign in to claude.ai, and ask the owner to share the artifact with you by email (public links can\'t join).</p>'; return; }
       const list = games.filter((g) => !g.mine);
       box.innerHTML = list.length
         ? list.map((g) => `<button class="game-pick" data-act="doJoin" data-code="${esc(g.code)}">🚗 ${esc(g.host)}'s world <small>Day ${g.day} · ${g.n} driver${g.n === 1 ? '' : 's'}</small></button>`).join('')
@@ -354,13 +355,16 @@ export class App {
     this.bgLast = now;
     if (dt <= 0) return;
     const g = this.game, sim = this.sim;
+    // alone, a hidden game simply waits (as it always has); only friends keep it running
+    if (!this.net.peers.size) { this.net.update(); return; }
+    g.paused = false;
     sim.tick(dt);
     this.bridge.update(dt);
     g.director.update(dt);
     const pc = this.player.car;
     sim.cmd('playerPos', { x: pc.body.pos.x, z: pc.body.pos.z, name: this.playerName }, 'host');
     g.frame(dt, false);
-    this.net.update(dt);
+    this.net.update();
   }
   onHostLost() { this.ui.toast('Lost connection to the host.', 'bad'); setTimeout(() => this.quitToTitle(), 3000); }
 
@@ -450,7 +454,7 @@ export class App {
         const m = a[0];
         ui.banner('JOB DONE!', `${esc(m.title)} · +${m.reward.caps || 0} caps`, '#06d6a0');
         this.audio.play('fanfare');
-        if (m.reward.items) this.giveItems(m.reward.items);
+        // reward items arrive through the separate 'giveItems' event
         if (this.trackedMission === m.id) this.trackedMission = null;
         break;
       }

@@ -109,3 +109,12 @@ test('replicas move smoothly over a jittery, lossy link', () => {
     assert.ok(r.delay < 260, `${JSON.stringify(cfg)} interpolation delay ${r.delay.toFixed(0)} ms`);
   }
 });
+
+test('a teleport snaps the replica instead of sweeping across the map', () => {
+  const car = { body: { pos: new THREE.Vector3(), quat: new THREE.Quaternion(), vel: new THREE.Vector3() } };
+  pushSample(car, 1000, { p: [0, 3, 0], q: [0, 0, 0, 1], v: [10, 0, 0] });
+  pushSample(car, 1050, { p: [0.5, 3, 0], q: [0, 0, 0, 1], v: [10, 0, 0] });
+  pushSample(car, 1100, { p: [900, 3, -400], q: [0, 0, 0, 1], v: [0, 0, 0] }); // respawned at a base
+  sampleAt(car, 1075);
+  assert.ok(car.body.pos.x > 899, `replica at ${car.body.pos.x.toFixed(1)} instead of the new spot`);
+});

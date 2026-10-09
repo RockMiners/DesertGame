@@ -278,10 +278,25 @@ export class Structures {
   }
 
   // ---------- per-frame: turrets & visuals ----------
-  render(dt, camPos) {
+  // turrets fight near any player (the host's car or a co-op partner's), whether or not anyone is drawing
+  tick(dt) {
     const g = this.game;
     this.checkT -= dt;
     if (this.checkT <= 0) { this.checkT = 0.5; this.sync(); }
+    for (const view of this.views.values()) {
+      const p = view.group.position;
+      let near = false;
+      for (const c of g.cars) {
+        if (!(c.isPlayer || c.isRemotePlayer)) continue;
+        const dx = c.body.pos.x - p.x, dz = c.body.pos.z - p.z;
+        if (dx * dx + dz * dz < 420 * 420) { near = true; break; }
+      }
+      if (near) this.updateTurrets(view, dt);
+    }
+  }
+
+  render(dt, camPos) {
+    const g = this.game;
     for (const view of this.views.values()) {
       const d = view.group.position.distanceTo(camPos);
       view.group.visible = d < g.viewDist + 100;
@@ -295,7 +310,6 @@ export class Structures {
         }
         if (m.userData.hit > 0) { m.userData.hit -= dt * 5; const s = 1 + Math.max(0, m.userData.hit) * 0.04; m.scale.set(s, 1 - Math.max(0, m.userData.hit) * 0.03, s); if (m.userData.hit <= 0) m.scale.setScalar(1); }
       }
-      if (d < 420 && !g.paused) this.updateTurrets(view, dt);
     }
   }
 

@@ -41,7 +41,9 @@ kbd { display: inline-block; font-family: var(--display); background: #fff; bord
 .lbar { width: min(420px, 80vw); height: 22px; border: 4px solid var(--ink); border-radius: 14px; background: #fff6; margin: 26px 0 10px; overflow: hidden; }
 .lbar i { display: block; height: 100%; background: repeating-linear-gradient(45deg, var(--gold) 0 14px, #ffb703 14px 28px); transition: width 0.3s; }
 #loading p { font-family: var(--display); font-size: 18px; text-shadow: 0 2px 0 var(--ink); }
-#screen { position: fixed; inset: 0; pointer-events: auto; display: flex; align-items: center; justify-content: center; z-index: 6; }
+#screen { position: fixed; inset: 0; pointer-events: auto; display: flex; align-items: center; justify-content: center; z-index: 6; overflow-y: auto; }
+/* auto margins centre the card but fall back to top-aligned + scrollable when it is taller than a short window */
+#screen > * { margin: auto; flex-shrink: 0; }
 #screen.title { background: linear-gradient(180deg, rgba(43, 29, 20, 0.05), rgba(43, 29, 20, 0.55)); }
 .title-card { text-align: center; max-width: 92vw; max-height: 96vh; overflow: auto; padding: 16px; }
 .title-card .tag { font-family: var(--display); color: #fff; font-size: 20px; text-shadow: 0 2px 0 var(--ink); margin: 14px 0 22px; }
@@ -53,6 +55,11 @@ kbd { display: inline-block; font-family: var(--display); background: #fff; bord
 .title-card > .muted { color: #fff; margin-top: 18px; }
 .form { background: var(--panel2); border: 4px solid var(--ink); border-radius: 18px; padding: 16px 20px; box-shadow: 0 8px 0 var(--ink); text-align: left; display: flex; flex-direction: column; gap: 10px; min-width: min(420px, 90vw); }
 .form label { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 800; }
+.games { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+.game-pick { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 17px; text-align: left; background: var(--good); }
+.game-pick small { font-family: var(--body); font-size: 12px; opacity: 0.8; }
+.invite { display: flex; gap: 6px; align-items: center; justify-content: center; margin: 6px 0; }
+.invite input { width: min(380px, 62vw); font-size: 13px; padding: 6px 8px; border: 3px solid var(--ink); border-radius: 10px; }
 #screen.intro { background: rgba(27, 20, 48, 0.88); }
 .intro-card { max-width: 720px; padding: 24px; color: #fff6e3; text-align: center; }
 .intro-card h2 { font-family: var(--display); color: var(--gold); font-size: 36px; text-shadow: 0 3px 0 var(--ink); }
