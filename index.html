@@ -12,6 +12,28 @@
 <body>
   <canvas id="game"></canvas>
   <div id="ui"></div>
+  <script>
+    // Never leave a silent black page: if the game's code can't start, say why.
+    (function () {
+      var shown = false;
+      function explain(detail) {
+        if (shown || window.app) return;
+        shown = true;
+        var raw = /Failed to resolve module specifier|Cannot use import statement|Unexpected token/i.test(detail || '');
+        var box = document.createElement('div');
+        box.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#1b1430;color:#fff6e3;font:16px/1.5 system-ui,sans-serif;padding:24px;z-index:99';
+        box.innerHTML = '<div style="max-width:620px"><h2 style="margin:0 0 8px">The game didn\'t start</h2>' +
+          (raw ? '<p>This page is serving the game\'s <b>source code</b>, which has to be built first.</p><p>If you own this GitHub Pages site: open the repository\'s <b>Settings \u2192 Pages</b> and set <b>Source</b> to <b>GitHub Actions</b> (not &ldquo;Deploy from a branch&rdquo;). Then run the &ldquo;Deploy to GitHub Pages&rdquo; workflow from the Actions tab.</p>'
+               : '<p>Your browser may not support WebGL2, or a script was blocked. Try an up-to-date desktop Chrome, Edge or Firefox.</p>') +
+          '<p style="opacity:.6;font-size:13px">' + String(detail || 'Timed out while loading.').replace(/[<&]/g, '') + '</p></div>';
+        document.body.appendChild(box);
+        // a slow download is not a failure: step aside as soon as the game turns up
+        var t = setInterval(function () { if (window.app) { clearInterval(t); box.remove(); } }, 500);
+      }
+      window.addEventListener('error', function (e) { if (!window.app) explain(e.message); });
+      setTimeout(function () { if (!window.app) explain(''); }, 15000);
+    })();
+  </script>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

@@ -70,6 +70,8 @@ export class App {
     this.hideLoading();
     this.last = performance.now();
     requestAnimationFrame((t) => this.loop(t));
+    // closing the tab mid-game keeps progress (the autosave only runs every few minutes)
+    addEventListener('pagehide', () => { if (this.mode === 'play') this.save(); });
     if (params.get('autostart') === '1') this.startNew({ name: params.get('name') || 'Tester', color: '#ff7f50', difficulty: 'normal' });
     else if (params.get('continue') === '1' && saved) this.continueGame();
     else if (params.get('join')) {
@@ -244,7 +246,8 @@ export class App {
   // ---------- saves ----------
   readSave() { return safeJSON(store.get(SAVE_KEY)); }
   save() {
-    if (this.net?.isClient || !this.sim.s) return;
+    if (this.net?.isClient) { this.saveFriendCar(); return; }
+    if (!this.sim.s) return;
     const c = this.player.car;
     const data = {
       v: 1, seed: this.seed, name: this.playerName, day: dayOf(this.sim.s.time), savedAt: Date.now(),
@@ -287,6 +290,14 @@ export class App {
   }
   quitToTitle() { this.save(); reboot({}); }
 
+  // A friend's car lives in their own browser, remembered per host world, so it survives rejoining.
+  friendKey() { return this.friendOf ? `dustbowl-friend-v1:${this.friendOf.seed}:${this.friendOf.host}` : null; }
+  saveFriendCar() {
+    const key = this.friendKey(), c = this.player?.car;
+    if (!key || !c || this.mode !== 'play') return;
+    store.set(key, JSON.stringify({ design: c.design, hp: c.alive ? c.hp : c.stats.hp, fuel: c.fuel, ammo: c.ammo, energy: c.energy, cargo: c.cargo, savedAt: Date.now() }));
+  }
+
   // ---------- co-op ----------
   async startHosting() {
     if (this.net || this.hosting) return;
@@ -325,7 +336,16 @@ export class App {
       this.net.applyJoinSections(welcome.sections);
       for (const e of this.sim.s.terrainEdits) this.game.terrain.flatten(...e);
       this.sim.isReplica = true;
-      this.startPlaying({ design: { ...DEFAULT_DESIGN, paint: '#00bbf9', name: `${name}'s ride` }, x: 12, z: 150, heading: 0 });
+      this.friendOf = { seed: welcome.seed, host: String(welcome.hostName || 'host').slice(0, 24) };
+      const kept = safeJSON(store.get(this.friendKey()));
+      const car = kept?.design ? { ...kept } : { design: { ...DEFAULT_DESIGN, paint: '#00bbf9', name: `${name}'s ride` } };
+      try { this.startPlaying({ ...car, x: 12, z: 150, heading: 0 }); }
+      catch (e) { // a remembered car that no longer builds: start fresh rather than fail the join
+        if (!kept?.design) throw e;
+        store.set(this.friendKey(), '');
+        this.startPlaying({ design: { ...DEFAULT_DESIGN, paint: '#00bbf9', name: `${name}'s ride` }, x: 12, z: 150, heading: 0 });
+      }
+      if (kept?.design) this.ui.toast(`🔧 Your ${esc(kept.design.name || 'car')} is back from last time`, 'good');
       this.ui.banner('JOINED!', `You ride with ${esc(welcome.hostName || 'your friend')}`, '#00e5ff');
     } catch (e) {
       console.warn('[net] join failed', e);
