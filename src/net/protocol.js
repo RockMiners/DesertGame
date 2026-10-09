@@ -69,13 +69,14 @@ export function buildSection(sim, key) {
   switch (key) {
     case 'core': {
       // story pacing drifts every tick and only matters to the host; player positions ride the snapshots
-      const { time, factions, bases, squads, npcs, chronicle, missions, story, players, ...rest } = s;
-      void time; void factions; void bases; void squads; void npcs; void chronicle; void story;
+      // nextId is the host's id counter (friends never mint ids)
+      const { time, factions, bases, squads, npcs, chronicle, missions, story, players, nextId, prodTotals, ...rest } = s;
+      void time; void factions; void bases; void squads; void npcs; void chronicle; void story; void nextId;
       const { waypoint, ...shared } = missions; // the host's personal map marker stays theirs
       void waypoint;
       const ps = {};
       for (const [id, p] of Object.entries(players || {})) ps[id] = { id, name: p.name, sleepBase: p.sleepBase };
-      return { ...rest, missions: shared, players: ps };
+      return { ...rest, missions: shared, players: ps, prodTotals: roundObj(prodTotals || {}) };
     }
     case 'factions': {
       const out = {};
@@ -118,7 +119,7 @@ export function buildSection(sim, key) {
   return null;
 }
 
-function roundObj(o) { const out = {}; for (const [k, v] of Object.entries(o)) out[k] = Math.round(v * 10) / 10; return out; }
+function roundObj(o) { const out = {}; for (const [k, v] of Object.entries(o)) out[k] = typeof v === 'number' ? Math.round(v * 10) / 10 : v; return out; }
 
 export function applySection(sim, key, data) {
   const s = sim.s;
